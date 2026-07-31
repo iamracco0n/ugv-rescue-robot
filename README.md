@@ -122,17 +122,45 @@ sudo apt install -y \
 
 ## Step 5. Python 패키지 설치
 
+**PyTorch는 반드시 따로 설치하세요.** `--index-url`을 한 명령에 같이 걸면 그 인덱스에
+없는 `ultralytics` 등을 못 찾아 설치가 실패합니다.
+
 ```bash
-pip3 install \
+# ① PyTorch — NVIDIA GPU가 있으면 CUDA 빌드로 (권장)
+#    nvidia-smi 의 "CUDA Version" 에 맞는 인덱스를 고를 것 (cu126 / cu128 / cu130)
+pip3 install --user --index-url https://download.pytorch.org/whl/cu130 \
+  torch==2.12.1+cu130 torchvision==0.27.1+cu130
+
+#    GPU가 없을 때만 CPU 빌드
+# pip3 install --user --index-url https://download.pytorch.org/whl/cpu torch torchvision
+
+# ② 나머지 (기본 PyPI 사용)
+pip3 install --user \
   ultralytics==8.4.39 \
-  torch torchvision --index-url https://download.pytorch.org/whl/cpu \
   numpy==1.26.4 \
   scipy \
+  scikit-learn \
   PyYAML
 ```
 
-> **주의:** 데스크탑에 NVIDIA GPU + CUDA가 없으면 CPU 버전 PyTorch를 사용합니다.
-> GPU가 있다면 CUDA 버전으로 설치하세요.
+> **CPU 빌드를 깔면 YOLO가 GPU를 못 씁니다.** `yolo_pose_node`는
+> `torch.cuda.is_available()`로 device를 자동 선택하므로 코드 수정은 필요 없고,
+> **설치된 휠이 CPU 전용인지가 전부입니다.** 확인:
+> ```bash
+> python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+> # 2.12.1+cu130 True   ← 정상
+> # 2.12.1+cpu   False  ← CPU 빌드. 위 ①로 재설치할 것
+> ```
+> 노드 기동 시 로그의 `YOLO 추론 device = 0` (GPU) / `= cpu` 로도 구분됩니다.
+>
+> 실측 차이 (yolov8n-pose, 640×480, RTX 3060):
+> | | 추론 시간 | 처리량 |
+> |---|---|---|
+> | CPU 빌드 | 104.5 ms/frame | 9.6 FPS — 카메라 15Hz를 못 따라감 |
+> | CUDA 빌드 | 9.2 ms/frame | 108.9 FPS |
+>
+> `scikit-learn`은 트리아지 모델(`triage_model_rf_robust.pkl`) 로드에 필요합니다.
+> 없으면 `ModuleNotFoundError: sklearn`으로 노드가 즉시 죽습니다.
 
 ---
 
