@@ -1,0 +1,24 @@
+# argus_navigation/config/mapper_params_online_async.yaml
+slam_toolbox:
+  ros__parameters:
+    # ROS2 프레임 설정
+    odom_frame: odom
+    base_frame: base_footprint
+    scan_topic: /scan
+    mode: mapping # 매핑 모드
+
+    # 센서 및 지도 설정
+    max_laser_range: 12.0 # 라이다 최대 유효 거리 (미터)
+    minimum_time_interval: 0.1
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.
+    stack_size_to_use: 40000000
+
+    # SLAM 파라미터 (6륜 스키드 제어 특성 고려)
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.1 # 10cm 이동할 때마다 지도 갱신
+    minimum_travel_heading: 0.1  # 약 5도 회전할 때마다 지도 갱신
+    
+    # 지도 해상도 (1픽셀당 미터)
+    resolution: 0.05

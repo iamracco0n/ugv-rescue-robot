@@ -1,0 +1,25 @@
+scan_to_scan_filter_chain:
+  ros__parameters:
+    # 로봇 본체(바퀴/포탑) 간섭 방지용 박스 필터
+    filter1:
+      name: box_filter
+      type: laser_filters/LaserScanBoxFilter
+      params:
+        box_frame: base_link
+        max_x: 0.35
+        max_y: 0.35
+        max_z: 0.2
+        min_x: -0.35
+        min_y: -0.35
+        min_z: -0.2
+
+    # 노이즈 및 잔상 제거용 Range 필터
+    filter2:
+      name: range_filter
+      type: laser_filters/LaserScanRangeFilter
+      params:
+        use_message_range_limits: false
+        lower_threshold: 0.15         
+        upper_threshold: 8.0          
+        lower_replacement_value: 4.9  
+        upper_replacement_value: 4.9

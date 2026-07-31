@@ -1,0 +1,69 @@
+# slam_params.yaml
+# 실내 환경에서의 SLAMToolbox 파라미터
+# 핵심 목표: 루프클로저 활성화로 오도메트리 누적 오차 보정
+slam_toolbox:
+  ros__parameters:
+
+    # ----- 솔버 -----
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # ----- 프레임 -----
+    odom_frame:  odom
+    map_frame:   map
+    base_frame:  base_footprint
+    scan_topic:  /scan
+    mode:        mapping   # mapping / localization / lifelong
+
+    # ----- 기본 설정 -----
+    debug_logging:             false
+    throttle_scans:            1
+    transform_publish_period:  0.02      # 50 Hz TF 발행
+    map_update_interval:       3.0       # 3초마다 맵 갱신 (실내 detail)
+    resolution:                0.05      # 5cm 해상도
+    max_laser_range:           10.0      # SLLiDAR A1 최대 유효거리
+    minimum_time_interval:     0.15
+    transform_timeout:         0.3
+    tf_buffer_duration:        30.0
+    stack_size_to_use:         40000000
+
+    # ----- 스캔 매칭 (실내 정확도 향상) -----
+    use_scan_matching:      true
+    use_scan_barycenter:    true
+    enable_interactive_mode: false
+
+    # 새 노드 생성 조건 — 너무 촘촘하면 계산량 급증
+    minimum_travel_distance: 0.25   # 25cm 이동시 노드 생성
+    minimum_travel_heading:  0.25   # ~14° 회전시 노드 생성
+
+    scan_buffer_size:                     40
+    scan_buffer_maximum_scan_distance:    10.0
+    link_match_minimum_response_fine:     0.1
+    distance_variance_penalty:            0.4
+    angle_variance_penalty:               0.8
+
+    fine_search_angle_offset:   0.00349   # 0.2°
+    coarse_search_angle_offset: 0.349     # 20°
+    coarse_angle_resolution:    0.0349    # 2°
+    minimum_angle_penalty:      0.9
+    minimum_distance_penalty:   0.5
+    use_response_expansion:     true
+
+    # ----- 루프클로저 (오도메트리 드리프트 보정 핵심) -----
+    # 루프 탐색 공간: 로봇이 약 8m 이내에서 이전에 지나간 곳을 감지
+    loop_search_space_dimension:        8.0
+    # 루프 후보 체인 최소 길이: 짧은 체인은 False Positive 방지
+    loop_search_minimum_chain_size:     10
+    # 두 단계 검증 (Coarse → Fine)으로 루프 신뢰도 확보
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_fine:   0.45
+    loop_match_maximum_variance_fine:   0.5
+    # 상관 탐색 공간 (Fine 단계)
+    correlation_search_space_dimension:      0.5
+    correlation_search_space_resolution:     0.01
+    correlation_search_space_smear_deviation: 0.1

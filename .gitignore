@@ -1,0 +1,30 @@
+# --- colcon 빌드 산출물 ---
+/build/
+/install/
+/log/
+
+# --- 서드파티 패키지 (각자 자체 저장소, ros2.repos 로 받을 것) ---
+/src/micro_ros_setup/
+/src/sllidar_ros2/
+/src/uros/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# --- 런타임 산출물 ---
+/patient_locations.txt
+/rosgraph.dot
+/frames_*.gv
+
+# --- 로컬 아티팩트 (배포용 아님) ---
+/torch_nv.whl
+/src/ugv_bringup.zip
+
+# --- 편집기/OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store

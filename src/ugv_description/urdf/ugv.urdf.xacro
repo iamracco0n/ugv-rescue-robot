@@ -1,0 +1,244 @@
+<?xml version="1.0"?>
+<robot name="ugv" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <material name="black"><color rgba="0.1 0.1 0.1 1"/></material>
+  <material name="dark_gray"><color rgba="0.3 0.3 0.3 1"/></material>
+  <material name="gray"><color rgba="0.5 0.5 0.5 1"/></material>
+  <material name="silver"><color rgba="0.75 0.75 0.75 1"/></material>
+  <material name="blue"><color rgba="0.0 0.0 0.8 1"/></material>
+  <material name="red"><color rgba="0.8 0.0 0.0 1"/></material>
+
+  <link name="base_footprint"/>
+
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.15" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <visual>
+      <geometry><box size="0.50 0.34 0.14"/></geometry>
+      <material name="silver"/>
+    </visual>
+    <collision name="base_collision">
+      <geometry><box size="0.50 0.34 0.14"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="5.0"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.05" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.15"/>
+    </inertial>
+  </link>
+
+  <gazebo reference="base_link">
+    <kinematic>true</kinematic>
+    <gravity>false</gravity>
+  </gazebo>
+
+  <xacro:macro name="wheel" params="prefix x_reflect y_reflect">
+    <link name="${prefix}_wheel_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="1.570796 0 0"/>
+        <geometry><cylinder radius="0.05" length="0.04"/></geometry>
+        <material name="dark_gray"/>
+      </visual>
+    </link>
+
+    <joint name="${prefix}_wheel_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="${prefix}_wheel_link"/>
+      <origin xyz="${0.20 * x_reflect} ${0.19 * y_reflect} -0.10" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:wheel prefix="front_left" x_reflect="1" y_reflect="1" />
+  <xacro:wheel prefix="front_right" x_reflect="1" y_reflect="-1" />
+  <xacro:wheel prefix="mid_left" x_reflect="0" y_reflect="1" />
+  <xacro:wheel prefix="mid_right" x_reflect="0" y_reflect="-1" />
+  <xacro:wheel prefix="rear_left" x_reflect="-1" y_reflect="1" />
+  <xacro:wheel prefix="rear_right" x_reflect="-1" y_reflect="-1" />
+
+  <link name="laser_frame">
+    <visual>
+      <geometry><cylinder radius="0.035" length="0.04"/></geometry>
+      <material name="blue"/>
+    </visual>
+  </link>
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser_frame"/>
+    <origin xyz="0.245 0.0 0.08" rpy="0 0 3.14159265"/>
+  </joint>
+
+  <link name="turret_link">
+    <visual>
+      <geometry><box size="0.06 0.12 0.30"/></geometry>
+      <material name="silver"/>
+    </visual>
+    <collision>
+      <geometry><box size="0.06 0.12 0.30"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
+  </link>
+  <joint name="turret_yaw_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="turret_link"/>
+    <origin xyz="0 0 0.245" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.2832" upper="6.2832" effort="100" velocity="1.0"/>
+  </joint>
+
+  <link name="gun_link">
+    <visual>
+      <origin xyz="0.03 0 -0.02" rpy="0 0 0"/>
+      <geometry><box size="0.08 0.08 0.06"/></geometry>
+      <material name="gray"/>
+    </visual>
+    <collision>
+      <origin xyz="0.03 0 -0.02" rpy="0 0 0"/>
+      <geometry><box size="0.08 0.08 0.06"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.2"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+  <joint name="turret_pitch_joint" type="revolute">
+    <parent link="turret_link"/>
+    <child link="gun_link"/>
+    <origin xyz="0 0 0.15" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.52" upper="0.52" effort="100" velocity="1.0"/>
+  </joint>
+
+  <link name="camera_link">
+    <visual>
+      <geometry><box size="0.025 0.09 0.025"/></geometry>
+      <material name="red"/>
+    </visual>
+  </link>
+  <joint name="camera_joint" type="fixed">
+    <parent link="gun_link"/>
+    <child link="camera_link"/>
+    <origin xyz="0.06 0.0 0.01" rpy="0 0 0"/>
+  </joint>
+
+  <gazebo>
+    <plugin filename="ignition-gazebo-joint-state-publisher-system" name="ignition::gazebo::systems::JointStatePublisher">
+      <topic>/joint_states</topic>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-velocity-control-system" name="ignition::gazebo::systems::VelocityControl">
+      <topic>cmd_vel</topic>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-odometry-publisher-system" name="ignition::gazebo::systems::OdometryPublisher">
+      <odom_frame>odom</odom_frame>
+      <robot_base_frame>base_footprint</robot_base_frame>
+      <odom_publish_frequency>50</odom_publish_frequency>
+      <odom_topic>odom</odom_topic>
+      <tf_topic>/model/ugv/tf</tf_topic>
+      <publish_tf>false</publish_tf>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-joint-controller-system" name="ignition::gazebo::systems::JointController">
+      <joint_name>turret_yaw_joint</joint_name>
+      <use_velocity_commands>true</use_velocity_commands>
+      <topic>/turret_yaw_cmd</topic>
+    </plugin>
+    <plugin filename="ignition-gazebo-joint-controller-system" name="ignition::gazebo::systems::JointController">
+      <joint_name>turret_pitch_joint</joint_name>
+      <use_velocity_commands>true</use_velocity_commands>
+      <topic>/turret_pitch_cmd</topic>
+    </plugin>
+  </gazebo>
+
+  <gazebo reference="laser_frame">
+    <sensor name="lidar" type="gpu_lidar">
+      <pose>0 0 0 0 0 0</pose>
+      <topic>/scan</topic>
+      <update_rate>10</update_rate>
+      <ignition_frame_id>laser_frame</ignition_frame_id>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>1080</samples>
+            <resolution>1.000000</resolution>
+            <min_angle>0.000000</min_angle>
+            <max_angle>6.280000</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.120000</min>
+          <max>25.0</max>
+          <resolution>0.015000</resolution>
+        </range>
+      </ray>
+      <always_on>true</always_on>
+      <visualize>true</visualize>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="camera_link">
+    <sensor name="rgbd_camera" type="rgbd_camera">
+      <pose>0 0 0 0 0 0</pose>
+      <topic>/camera</topic>
+      <update_rate>15</update_rate>
+      <camera>
+        <horizontal_fov>1.089</horizontal_fov>
+        <image>
+          <width>640</width>
+          <height>480</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.10</near>
+          <far>8.0</far>
+        </clip>
+      </camera>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+    </sensor>
+  </gazebo>
+
+  <!-- ===== 열화상(Thermal) 카메라 =====
+       RGBD 카메라와 동일 링크(camera_link)·동일 해상도·동일 FOV로 장착.
+       → 열화상 픽셀(u,v)이 depth 픽셀(u,v)과 1:1 정렬되므로
+         화재 blob 위치에서 depth를 그대로 조회해 거리 추정 가능.
+       주의: thermal 센서는 ogre2 렌더 엔진에서만 동작 (월드 sensors 플러그인 render_engine=ogre2 필요).
+       출력: /thermal/image_raw (16bit mono, 픽셀값 = 온도[K] / linear_resolution). -->
+  <gazebo reference="camera_link">
+    <sensor name="thermal_camera" type="thermal">
+      <pose>0 0 0 0 0 0</pose>
+      <topic>/thermal/image_raw</topic>
+      <update_rate>10</update_rate>
+      <ignition_frame_id>camera_link</ignition_frame_id>
+      <camera>
+        <horizontal_fov>1.089</horizontal_fov>
+        <image>
+          <width>640</width>
+          <height>480</height>
+          <format>L16</format>
+        </image>
+        <clip>
+          <near>0.10</near>
+          <far>12.0</far>
+        </clip>
+      </camera>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <plugin filename="gz-sim-thermal-sensor-system"
+              name="gz::sim::systems::ThermalSensor">
+        <min_temp>253.15</min_temp>       <!-- -20°C -->
+        <max_temp>655.0</max_temp>        <!-- ~382°C (16bit×0.01 상한 655.35K) -->
+        <resolution>0.01</resolution>     <!-- linear_resolution: 픽셀 1 = 0.01K -->
+      </plugin>
+    </sensor>
+  </gazebo>
+</robot>

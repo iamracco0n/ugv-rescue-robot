@@ -1,0 +1,181 @@
+amcl:
+  ros__parameters:
+    use_sim_time: True
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: True
+    global_frame: map
+    robot_base_frame: base_footprint
+    odom_frame: odom
+    default_bt_xml_filename: "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml"
+
+controller_server:
+  ros__parameters:
+    use_sim_time: True
+    controller_frequency: 10.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.01
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.5
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugin: "goal_checker"
+    controller_plugins: ["FollowPath"]
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
+    FollowPath:
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: True
+      # --- [속도 및 가속도 수정 구간] ---
+      # 로봇: 110rpm × 2π × 0.06m / 60 = 0.69m/s (안전 마진 → 0.65)
+      # 포탑: 110rpm / 10기어 = 11rpm = 66°/s = 1.15 rad/s
+      min_vel_x: 0.0            # 후진 금지 — 전진 우선 정책
+      min_vel_y: 0.0
+      max_vel_x: 0.65
+      max_vel_theta: 1.15
+      max_speed_xy: 0.65
+      max_speed_theta: 1.15
+      acc_lim_x: 3.0          
+      acc_lim_theta: 4.0      
+      decel_lim_x: -3.0      
+      decel_lim_theta: -4.0   
+      # ------------------------------
+      min_speed_xy: 0.0
+      min_speed_theta: 0.2
+      vx_samples: 20
+      vy_samples: 5
+      vtheta_samples: 20
+      sim_time: 1.7
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 0.2
+      xy_goal_tolerance: 0.25
+      trans_stopped_velocity: 0.25
+      short_circuit_trajectory_evaluation: True
+      stateful: True
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      BaseObstacle.scale: 50.0
+      PathAlign.scale: 32.0
+      PathAlign.forward_point_distance: 0.1
+      GoalAlign.scale: 24.0
+      GoalAlign.forward_point_distance: 0.1
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_footprint
+      use_sim_time: True
+      rolling_window: True
+      width: 3
+      height: 3
+      resolution: 0.05
+      footprint: "[[-0.25, -0.2], [0.25, -0.2], [0.25, 0.2], [-0.25, 0.2]]"
+      plugins: ["obstacle_layer", "inflation_layer"]
+      always_send_full_costmap: True
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        footprint_clearing_enabled: True 
+        observation_sources: scan
+        scan:
+          topic: /scan
+          data_type: "LaserScan"
+          clearing: True
+          marking: True
+          inf_is_valid: True
+          obstacle_max_range: 24.5    
+          raytrace_max_range: 25.0    
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.55
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: map
+      robot_base_frame: base_footprint
+      use_sim_time: True
+      footprint: "[[-0.25, -0.2], [0.25, -0.2], [0.25, 0.2], [-0.25, 0.2]]"
+      resolution: 0.05
+      track_unknown_space: False  
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      always_send_full_costmap: True
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        footprint_clearing_enabled: True
+        observation_sources: scan fire
+        scan:
+          topic: /scan
+          data_type: "LaserScan"
+          clearing: True
+          marking: True
+          inf_is_valid: True
+          obstacle_max_range: 24.5
+          raytrace_max_range: 25.0
+        # 화재 구역: fire_detection_node 가 map 프레임 점구름으로 발행.
+        # marking-only(clearing:False) → 한 번 표시된 화재는 유지되어 경로가 우회.
+        fire:
+          topic: /fire_cloud
+          data_type: "PointCloud2"
+          clearing: False
+          marking: True
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_max_range: 30.0
+          raytrace_max_range: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.55
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 10.0
+    use_sim_time: True
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: True
+      allow_unknown: True  
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: True
+    global_frame: odom
+    robot_base_frame: base_footprint
+    behavior_plugins: ["spin", "backup", "wait", "drive_on_heading"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    cycle_frequency: 10.0
+
+lifecycle_manager_navigation:
+  ros__parameters:
+    use_sim_time: True
+    autostart: True
+    node_names: ['controller_server', 'smoother_server', 'planner_server', 'behavior_server', 'bt_navigator', 'waypoint_follower', 'velocity_smoother']

@@ -1,0 +1,28 @@
+ekf_filter_node:
+  ros__parameters:
+    frequency: 50.0  # 50Hz
+    two_d_mode: true
+    publish_tf: true # odom -> base_footprint TF
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_footprint
+    world_frame: odom
+
+    # 1. 바퀴 엔코더 설정 
+    odom0: wheel/odom
+    odom0_config: [false, false, false, # X, Y, Z 
+                   false, false, false, # Roll, Pitch, Yaw 
+                   true,  false, false, # X 속도 (전진)
+                   false, false, true,  # Yaw 속도 (회전)
+                   false, false, false]
+    odom0_differential: false
+
+    # 2. IMU 설정 (리얼센스 or 외장 IMU)
+    imu0: imu/data
+    imu0_config: [false, false, false,
+                  false, false, false,  
+                  false, false, false,
+                  false, false, true,   # Yaw 속도 (회전) (스키드 슬립 보정)
+                  false, false, false]
+    imu0_differential: false

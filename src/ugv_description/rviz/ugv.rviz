@@ -1,0 +1,409 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 0
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Fog_of_War1
+        - /Seen_Memory1
+        - /Walls1
+        - /Active_FOV1
+        - /Robot_Trail1
+        - /Nav2_Plan1
+        - /SLAM_Map1
+        - /Global_Costmap1
+      Splitter Ratio: 0.5
+    Tree Height: 700
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Tool Properties
+    Expanded:
+      - /2D Goal Pose1
+    Name: Tool Properties
+    Splitter Ratio: 0.5
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+
+    # ────────────────────────────────────────────────────
+    # 배경 격자
+    # ────────────────────────────────────────────────────
+    - Alpha: 0.15
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 60; 60; 70
+      Enabled: true
+      Name: Grid
+      Reference Frame: <Fixed Frame>
+      Value: true
+
+    # ════════════════════════════════════════════════════
+    # DOOR KICKERS 레이어 스택 (렌더 순서: 아래→위)
+    #
+    #  [1] Fog_of_War   검정 안개  — 미수색 자유공간 덮음
+    #  [2] Seen_Memory  회색       — 30초+ 지난 수색 이력 (영구)
+    #  [3] Walls        흰색       — 관측된 SLAM 벽 (안개 위에)
+    #  [4] Walls_Scan   흰 점      — 현재 LiDAR hit (실시간 윤곽)
+    #  [5] Active_FOV   노란 콘    — D435i 실제 시야 (뎁스 반영)
+    #  [6] Robot/Trail/Path
+    # ════════════════════════════════════════════════════
+
+    # [1] 안개 (미수색 자유공간 = 검정)
+    #     map scheme: value 100 = 검정
+    - Alpha: 0.90
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Enabled: true
+      Name: Fog_of_War
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/seen_persistent
+      Value: true
+
+    # [2] 수색 기억 (30초+ 지난 곳 = 밝은 회색)
+    #     map scheme: value 30 = 밝은 회색
+    - Alpha: 0.70
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Enabled: true
+      Name: Seen_Memory
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/seen_recent
+      Value: true
+
+    # [3] 관측된 벽 = 흰색 (map scheme: value 0 = 흰색)
+    - Alpha: 1.0
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Enabled: true
+      Name: Walls
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/walls
+      Value: true
+
+    # [4] 현재 LiDAR scan hit = 흰색 점 (실시간 벽 윤곽)
+    - Alpha: 1
+      Class: rviz_default_plugins/LaserScan
+      Color: 255; 255; 255
+      Color Transformer: FlatColor
+      Decay Time: 0
+      Enabled: true
+      Name: Walls_Scan
+      Position Transformer: XYZ
+      Size (Meters): 0.05
+      Style: Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /scan
+      Value: true
+
+    # [5] D435i 실제 시야 콘 (뎁스 반영 정확한 폴리곤, 밝은 노란색)
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Active_FOV
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/active_fov
+      Value: true
+
+    # ═══ 화재/순찰 (신규) ═══════════════════════════════════
+    # [화재] 열화상 히트맵 — costmap scheme: 고온=빨강/보라
+    - Alpha: 0.7
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Enabled: true
+      Name: Fire_Heatmap
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /fire_heatmap
+      Value: true
+
+    # [화재] 불꽃 마커 + 온도 라벨
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Fire_Markers
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /fire_markers
+      Value: true
+
+    # [순찰] 경로 + 현재 목표 + 화재 경보 배너
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Patrol_Route
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /patrol_markers
+      Value: true
+
+    # [감지] 사람 오버레이 카메라 (YOLO 박스+골격+트리아지)
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Detection_Image
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /detection/image_annotated
+      Value: true
+
+    # [감지] 불 오버레이 카메라 (열화상 박스)
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Fire_Image
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /fire/image_annotated
+      Value: true
+
+    # ────────────────────────────────────────────────────
+    # 로봇 상태
+    # ────────────────────────────────────────────────────
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Name: RobotModel
+      Value: true
+
+    # 이동 궤적 — 노란색 선
+    - Alpha: 1
+      Class: rviz_default_plugins/Path
+      Color: 255; 200; 0
+      Enabled: true
+      Line Style: Lines
+      Line Width: 0.07
+      Name: Robot_Trail
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/robot_trail
+      Value: true
+
+    # Nav2 계획 경로 — 밝은 초록
+    - Alpha: 1
+      Class: rviz_default_plugins/Path
+      Color: 80; 255; 120
+      Enabled: true
+      Line Style: Lines
+      Line Width: 0.06
+      Name: Nav2_Plan
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /plan
+      Value: true
+
+    # Fog Frontier 목표 + 포탑 조준 디버그 (초록 실린더 = Nav2 goal)
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Exploration_Debug
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /slice_debug
+      Value: true
+
+    # 포탑 헤딩
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Turret_Heading
+      Namespaces:
+        turret_heading: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /turret_heading
+      Value: true
+
+    # ────────────────────────────────────────────────────
+    # 경보
+    # ────────────────────────────────────────────────────
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: false
+      Name: Blind_Corners
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/blind_corners
+      Value: false
+
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Patient_Markers
+      Namespaces:
+        patient_sphere: true
+        patient_text: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /patient_markers
+      Value: true
+
+    # ════════════════════════════════════════════════════
+    # 진단용 — 기본 OFF (발표/검증 시 Enable)
+    # ════════════════════════════════════════════════════
+
+    - Alpha: 0.20
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Enabled: true
+      Name: SLAM_Map
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map
+      Value: true
+
+    - Alpha: 0.25
+      Class: rviz_default_plugins/Map
+      Enabled: true
+      Name: Global_Costmap
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /global_costmap/costmap
+      Value: true
+
+    - Alpha: 0.35
+      Class: rviz_default_plugins/Map
+      Enabled: false
+      Name: Local_Costmap
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /local_costmap/costmap
+      Value: false
+
+    - Alpha: 1
+      Class: rviz_default_plugins/Path
+      Color: 255; 120; 60
+      Enabled: false
+      Line Style: Lines
+      Line Width: 0.04
+      Name: Nav2_Local_Path
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /local_plan
+      Value: false
+
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: false
+      Name: Slice_Debug
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /slice_debug
+      Value: false
+
+    - Alpha: 0.45
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Enabled: false
+      Name: Camera_Coverage_Legacy
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /visual_coverage
+      Value: false
+
+  Enabled: true
+  Global Options:
+    Background Color: 22; 22; 28
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetInitialPose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /goal_pose
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Scale: 20
+      Target Frame: base_link
+      Value: TopDownOrtho (rviz)
+    Saved: ~

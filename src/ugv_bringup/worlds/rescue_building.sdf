@@ -1,0 +1,479 @@
+<?xml version="1.0" ?>
+<!--
+  rescue_building.sdf
+  ===================
+  실내 구조 탐색 시나리오 맵
+
+  [ 평면도 ]
+  ┌────────────────────────────────────────────┐  Y=10
+  │   Room A (NW, 14×6m)  │  Room B (NE, 14×6m)│
+  │      [L3 서있]         │                    │
+  ├───door(−7~−5)──────────┼────door(4~6)───────┤  Y=4
+  │                                             │
+  │              MAIN HALL                      │
+  │   [잔해 6개]          [L2 웅크림]           │  Y=0 (로봇 시작)
+  │                                             │
+  ├──door(−8~−6)───────────┼────door(5~7)───────┤  Y=−4
+  │  Room C (SW, 13×6m)    │  Room D (SE, 15×6m)│
+  │                        │  [잔해2] [L1 누움]  │
+  └────────────────────────────────────────────┘  Y=−10
+  X=−14                 X=−1                 X=14
+
+  인물 배치:
+    L3 Normal  (초록, 서있):  Room A (-9, 7)
+    L2 Urgent  (주황, 웅크림): Main Hall (6, 1)
+    L1 Critical (빨강, 누움):  Room D  (9, -7)
+
+  사람 모델: Gazebo Fuel 실제 메쉬 사용 → 카메라 이미지에 사람처럼 렌더링
+              YOLOv8-pose 감지 가능 (렌더링 도메인 갭으로 신뢰도 다소 낮을 수 있음)
+-->
+<sdf version="1.7">
+  <world name="rescue_building">
+
+    <!-- ===== 플러그인 ===== -->
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <!-- thermal 카메라는 ogre2에서만 렌더링됨 (ogre1 미지원) -->
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <!-- ===== 조명 ===== -->
+    <!-- 주 태양광 (약하게 — 실내 느낌) -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 15 0 0 0</pose>
+      <diffuse>0.6 0.6 0.6 1</diffuse>
+      <specular>0.1 0.1 0.1 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>0.1 0.1 -1.0</direction>
+    </light>
+
+    <!-- 실내 보조 점광원 (복도) -->
+    <light type="point" name="hall_light_1">
+      <pose>0 0 2.8 0 0 0</pose>
+      <diffuse>0.9 0.9 0.85 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>12</range>
+        <constant>0.5</constant>
+        <linear>0.1</linear>
+        <quadratic>0.02</quadratic>
+      </attenuation>
+    </light>
+    <light type="point" name="hall_light_2">
+      <pose>-9 0 2.8 0 0 0</pose>
+      <diffuse>0.85 0.85 0.8 1</diffuse>
+      <attenuation>
+        <range>10</range>
+        <constant>0.5</constant>
+        <linear>0.1</linear>
+        <quadratic>0.025</quadratic>
+      </attenuation>
+    </light>
+    <light type="point" name="room_a_light">
+      <pose>-7 7 2.8 0 0 0</pose>
+      <diffuse>0.85 0.85 0.8 1</diffuse>
+      <attenuation>
+        <range>10</range>
+        <constant>0.5</constant>
+        <linear>0.1</linear>
+        <quadratic>0.025</quadratic>
+      </attenuation>
+    </light>
+    <light type="point" name="room_d_light">
+      <pose>8 -7 2.8 0 0 0</pose>
+      <diffuse>0.85 0.85 0.8 1</diffuse>
+      <attenuation>
+        <range>10</range>
+        <constant>0.5</constant>
+        <linear>0.1</linear>
+        <quadratic>0.025</quadratic>
+      </attenuation>
+    </light>
+
+    <!-- ===== 바닥 ===== -->
+    <model name="floor">
+      <static>true</static>
+      <pose>0 0 -0.05 0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>28 20 0.1</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>28 20 0.1</size></box></geometry>
+          <material>
+            <ambient>0.82 0.80 0.76 1</ambient>
+            <diffuse>0.82 0.80 0.76 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ===== 외벽 (두께 0.25, 높이 2.8) ===== -->
+    <model name="outer_wall_north">
+      <static>true</static>
+      <pose>0 10 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>28 0.25 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>28 0.25 2.8</size></box></geometry>
+          <material><ambient>0.80 0.78 0.72 1</ambient><diffuse>0.80 0.78 0.72 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="outer_wall_south">
+      <static>true</static>
+      <pose>0 -10 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>28 0.25 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>28 0.25 2.8</size></box></geometry>
+          <material><ambient>0.80 0.78 0.72 1</ambient><diffuse>0.80 0.78 0.72 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="outer_wall_east">
+      <static>true</static>
+      <pose>14 0 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.25 20.25 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.25 20.25 2.8</size></box></geometry>
+          <material><ambient>0.80 0.78 0.72 1</ambient><diffuse>0.80 0.78 0.72 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="outer_wall_west">
+      <static>true</static>
+      <pose>-14 0 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.25 20.25 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.25 20.25 2.8</size></box></geometry>
+          <material><ambient>0.80 0.78 0.72 1</ambient><diffuse>0.80 0.78 0.72 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ===== 북측 내벽 (y=4, 문 2개) ===== -->
+    <!--  문 A: x=-7 ~ -5  |  문 B: x=4 ~ 6  -->
+    <model name="north_wall_w">   <!-- x=-14 ~ -7, length=7 -->
+      <static>true</static>
+      <pose>-10.5 4 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>7 0.2 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>7 0.2 2.8</size></box></geometry>
+          <material><ambient>0.72 0.70 0.65 1</ambient><diffuse>0.72 0.70 0.65 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="north_wall_c">   <!-- x=-5 ~ 4, length=9 -->
+      <static>true</static>
+      <pose>-0.5 4 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>9 0.2 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>9 0.2 2.8</size></box></geometry>
+          <material><ambient>0.72 0.70 0.65 1</ambient><diffuse>0.72 0.70 0.65 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="north_wall_e">   <!-- x=6 ~ 14, length=8 -->
+      <static>true</static>
+      <pose>10 4 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>8 0.2 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>8 0.2 2.8</size></box></geometry>
+          <material><ambient>0.72 0.70 0.65 1</ambient><diffuse>0.72 0.70 0.65 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 북측 방 구분벽 (x=0, y=4~10) -->
+    <model name="north_room_divider">
+      <static>true</static>
+      <pose>0 7 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 6 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.2 6 2.8</size></box></geometry>
+          <material><ambient>0.72 0.70 0.65 1</ambient><diffuse>0.72 0.70 0.65 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ===== 남측 내벽 (y=-4, 문 2개) ===== -->
+    <!--  문 C: x=-8 ~ -6  |  문 D: x=5 ~ 7  -->
+    <model name="south_wall_w">   <!-- x=-14 ~ -8, length=6 -->
+      <static>true</static>
+      <pose>-11 -4 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>6 0.2 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>6 0.2 2.8</size></box></geometry>
+          <material><ambient>0.72 0.70 0.65 1</ambient><diffuse>0.72 0.70 0.65 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="south_wall_c">   <!-- x=-6 ~ 5, length=11 -->
+      <static>true</static>
+      <pose>-0.5 -4 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>11 0.2 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>11 0.2 2.8</size></box></geometry>
+          <material><ambient>0.72 0.70 0.65 1</ambient><diffuse>0.72 0.70 0.65 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="south_wall_e">   <!-- x=7 ~ 14, length=7 -->
+      <static>true</static>
+      <pose>10.5 -4 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>7 0.2 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>7 0.2 2.8</size></box></geometry>
+          <material><ambient>0.72 0.70 0.65 1</ambient><diffuse>0.72 0.70 0.65 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 남측 방 구분벽 (x=-1, y=-4~-10) -->
+    <model name="south_room_divider">
+      <static>true</static>
+      <pose>-1 -7 1.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 6 2.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.2 6 2.8</size></box></geometry>
+          <material><ambient>0.72 0.70 0.65 1</ambient><diffuse>0.72 0.70 0.65 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ===== 잔해 (메인홀 — LiDAR 회피 시연용) ===== -->
+    <!-- 콘크리트 잔해: 어두운 회갈색, 크기 0.7~1.8m -->
+
+    <model name="debris_1">  <!-- 중앙 북쪽 -->
+      <static>true</static>
+      <pose>3 1.5 0.5 0 0 0.26</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>1.2 0.8 1.0</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>1.2 0.8 1.0</size></box></geometry>
+          <material><ambient>0.42 0.38 0.33 1</ambient><diffuse>0.42 0.38 0.33 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="debris_2">  <!-- 서쪽 중앙 -->
+      <static>true</static>
+      <pose>-4 -0.5 0.45 0 0 -0.35</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.9 1.4 0.9</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.9 1.4 0.9</size></box></geometry>
+          <material><ambient>0.38 0.34 0.30 1</ambient><diffuse>0.38 0.34 0.30 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="debris_3">  <!-- 동쪽 남쪽 — 큰 콘크리트 블록 -->
+      <static>true</static>
+      <pose>8 -2.5 0.55 0 0 0.18</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>1.5 0.7 1.1</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>1.5 0.7 1.1</size></box></geometry>
+          <material><ambient>0.45 0.40 0.36 1</ambient><diffuse>0.45 0.40 0.36 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="debris_4">  <!-- 서쪽 — 무너진 벽 잔해 -->
+      <static>true</static>
+      <pose>-9 2.0 0.35 0 0 0.1</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>1.8 0.6 0.7</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>1.8 0.6 0.7</size></box></geometry>
+          <material><ambient>0.50 0.46 0.40 1</ambient><diffuse>0.50 0.46 0.40 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="debris_5">  <!-- 중앙 남쪽 -->
+      <static>true</static>
+      <pose>1 -2.5 0.6 0 0 0.52</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.7 1.0 1.2</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.7 1.0 1.2</size></box></geometry>
+          <material><ambient>0.40 0.36 0.32 1</ambient><diffuse>0.40 0.36 0.32 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="debris_6">  <!-- 동쪽 북쪽 — 가로로 누운 기둥 잔해 -->
+      <static>true</static>
+      <pose>11 2.5 0.35 0 0 0.08</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>2.0 0.5 0.7</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>2.0 0.5 0.7</size></box></geometry>
+          <material><ambient>0.38 0.36 0.32 1</ambient><diffuse>0.38 0.36 0.32 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 잔해: Room D (southeast) — L1 환자 주변 -->
+    <model name="debris_7">
+      <static>true</static>
+      <pose>7 -7.5 0.4 0 0 -0.2</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>1.0 0.8 0.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>1.0 0.8 0.8</size></box></geometry>
+          <material><ambient>0.42 0.38 0.34 1</ambient><diffuse>0.42 0.38 0.34 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 잔해: Room C (southwest) -->
+    <model name="debris_8">
+      <static>true</static>
+      <pose>-8 -7 0.4 0 0 0.4</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>1.2 0.7 0.8</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>1.2 0.7 0.8</size></box></geometry>
+          <material><ambient>0.40 0.37 0.33 1</ambient><diffuse>0.40 0.37 0.33 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ===================================================== -->
+    <!--   인물 모델 — Gazebo Fuel 실제 사람 메쉬              -->
+    <!--   카메라 이미지에 실제 사람처럼 렌더링 → YOLO 감지 가능 -->
+    <!-- ===================================================== -->
+
+    <!--
+      L3 Normal — Room A (NW), (-9, 7)
+      서 있는 남성 (Standing person 메쉬)
+    -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Standing person</uri>
+      <name>person_l3_normal</name>
+      <static>true</static>
+      <pose>-9 7 0 0 0 -1.57</pose>
+    </include>
+
+    <!--
+      L2 Urgent — Main Hall, (6, 1)
+      여성 (Casual female 메쉬) — 잔해 옆에 서있음
+    -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Casual female</uri>
+      <name>person_l2_urgent</name>
+      <static>true</static>
+      <pose>6 1 0 0 0 2.0</pose>
+    </include>
+
+    <!--
+      L1 Critical — Room D (SE), (10, -7)
+      Standing person 모델을 pitch -90도 회전 → 바닥에 누운 자세
+    -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Standing person</uri>
+      <name>person_l1_critical</name>
+      <static>true</static>
+      <pose>10 -7 0.15 0 -1.5708 0.5</pose>
+    </include>
+
+    <!-- ===================================================== -->
+    <!--   가상 화재 열원 (Fire sources)                        -->
+    <!--   · 충돌체(collision) 없음 → LiDAR는 통과, 열화상 카메라만 감지  -->
+    <!--     (경비 로봇이 순찰 중 열화상으로 '발견'하는 시나리오)          -->
+    <!--   · Thermal 플러그인으로 고온(600K≈327°C) 지정                  -->
+    <!--   · emissive 주황 비주얼 + 점광원으로 불빛 연출                  -->
+    <!--   · nav 회피는 fire_detection_node가 /fire_cloud로 costmap에 마킹  -->
+    <!-- ===================================================== -->
+
+    <!-- 화재 1: Room B (북동) 구석 -->
+    <model name="fire_source_1">
+      <static>true</static>
+      <pose>12 8.5 0.6 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><box><size>0.9 0.9 1.2</size></box></geometry>
+          <material>
+            <ambient>1.0 0.35 0.0 1</ambient>
+            <diffuse>1.0 0.45 0.0 1</diffuse>
+            <emissive>1.0 0.45 0.05 1</emissive>
+          </material>
+          <plugin filename="gz-sim-thermal-system"
+                  name="gz::sim::systems::Thermal">
+            <temperature>600.0</temperature>
+          </plugin>
+        </visual>
+        <light name="fire_light_1" type="point">
+          <pose>0 0 0.7 0 0 0</pose>
+          <diffuse>1.0 0.5 0.1 1</diffuse>
+          <specular>0.6 0.3 0.1 1</specular>
+          <attenuation>
+            <range>9</range>
+            <constant>0.4</constant>
+            <linear>0.12</linear>
+            <quadratic>0.02</quadratic>
+          </attenuation>
+        </light>
+      </link>
+    </model>
+
+    <!-- 화재 2: Room C (남서) -->
+    <model name="fire_source_2">
+      <static>true</static>
+      <pose>-12 -8 0.55 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><box><size>0.8 0.8 1.1</size></box></geometry>
+          <material>
+            <ambient>1.0 0.35 0.0 1</ambient>
+            <diffuse>1.0 0.45 0.0 1</diffuse>
+            <emissive>1.0 0.45 0.05 1</emissive>
+          </material>
+          <plugin filename="gz-sim-thermal-system"
+                  name="gz::sim::systems::Thermal">
+            <temperature>580.0</temperature>
+          </plugin>
+        </visual>
+        <light name="fire_light_2" type="point">
+          <pose>0 0 0.7 0 0 0</pose>
+          <diffuse>1.0 0.5 0.1 1</diffuse>
+          <specular>0.6 0.3 0.1 1</specular>
+          <attenuation>
+            <range>8</range>
+            <constant>0.4</constant>
+            <linear>0.12</linear>
+            <quadratic>0.02</quadratic>
+          </attenuation>
+        </light>
+      </link>
+    </model>
+
+  </world>
+</sdf>
