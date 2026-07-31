@@ -14,10 +14,13 @@ __pycache__/
 *.egg-info/
 .venv/
 
-# --- 런타임 산출물 ---
-/patient_locations.txt
+# --- 런타임 산출물 (시뮬 실행 중 갱신됨) ---
+patient_locations.txt
 /rosgraph.dot
 /frames_*.gv
+
+# --- Claude Code 작업 디렉터리 ---
+/.claude/
 
 # --- 로컬 아티팩트 (배포용 아님) ---
 /torch_nv.whl
