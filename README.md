@@ -62,10 +62,25 @@ sudo apt install -y \
 
 ---
 
-## Step 3. Gazebo Garden + ros_gz 설치
+## Step 3. Gazebo 설치 (Harmonic 권장)
+
+> **이 저장소는 Gazebo Harmonic(gz-sim8) 기준으로 동작 검증되어 있습니다.**
+> Harmonic이면 아래 블록 대신 이렇게 설치하세요:
+>
+> ```bash
+> sudo apt install -y gz-harmonic
+> sudo apt install -y \
+>   ros-humble-ros-gzharmonic-sim \
+>   ros-humble-ros-gzharmonic-bridge \
+>   ros-humble-ros-gzharmonic-image \
+>   ros-humble-ros-gzharmonic-interfaces
+> ```
+>
+> Garden(gz-sim7)으로 되돌릴 경우 URDF 수정이 필요합니다 —
+> [Gazebo 버전별 주의사항](#gazebo-버전별-주의사항) 참조.
 
 ```bash
-# Gazebo Garden 저장소 추가
+# (참고) Gazebo Garden 저장소 추가
 sudo curl https://packages.osrfoundation.org/gazebo.gpg \
   --output /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] \
@@ -165,8 +180,62 @@ source ~/.bashrc
 
 ```bash
 source ~/ugv_ws/install/setup.bash
+export GZ_SIM_RESOURCE_PATH=~/ugv_ws/install/ugv_description/share:$GZ_SIM_RESOURCE_PATH
+
+# ① Gazebo + 로봇 스폰 + 브리지만 (동작 확인용)
 ros2 launch ugv_bringup gazebo.launch.py
+
+# ② SLAM + Nav2 + 비전 풀스택
+ros2 launch ugv_bringup slam_nav_sim.launch.py
+
+# ③ 경비순찰 + 열화상 화재감지 (②에 순찰/화재 노드 추가)
+ros2 launch ugv_bringup patrol_sim.launch.py
 ```
+
+노드들이 0~12초에 걸쳐 순차 기동(SLAM 4s / Nav2 8s / 비전 10s / 순찰·화재 12s)하므로
+초반에는 덜 뜬 것처럼 보이는 게 정상입니다.
+
+---
+
+## Gazebo 버전별 주의사항
+
+Garden(gz-sim7)과 Harmonic(gz-sim8)은 **URDF 안의 플러그인/센서 표기법이 다릅니다.**
+현재 `ugv.urdf.xacro`는 Harmonic 표기를 씁니다.
+
+| 항목 | Garden (gz-sim7) | Harmonic (gz-sim8) |
+|------|------------------|--------------------|
+| 플러그인 `filename` | `ignition-gazebo-*-system` | `gz-sim-*-system` |
+| 플러그인 `name` | `ignition::gazebo::systems::*` | `gz::sim::systems::*` |
+| 센서 frame_id | `<ignition_frame_id>` | `<gz_frame_id>` |
+
+**증상별 원인 정리**
+
+- **로봇이 안 움직이고 `/odom`·`/joint_states`가 안 나옴**
+  → 플러그인 이름이 그 Gazebo 버전에 없는 것. 해당 `.so`가 없으면 **에러 없이 조용히
+  로드 실패**하므로 로그만 봐서는 모릅니다. 확인:
+  ```bash
+  ls /usr/lib/x86_64-linux-gnu/gz-sim-8/plugins/ | grep diff-drive
+  ```
+
+- **SLAM/Nav2에서 TF 조회 실패, `/scan`의 frame_id가 `ugv/base_footprint/lidar` 같은 스코프명**
+  → frame_id 엘리먼트명이 버전과 안 맞는 것. Harmonic이 읽는 이름은 `gz_frame_id`이며
+  다음으로 확인할 수 있습니다:
+  ```bash
+  strings /usr/lib/x86_64-linux-gnu/libgz-sensors8.so.8 | grep frame_id
+  ```
+
+- **로봇 스폰 직후 시뮬이 멈춘 것처럼 보이고 RTF가 0.001까지 떨어짐**
+  → **정상입니다.** ogre2 셰이더 최초 컴파일 구간이며 잠시 후 RTF 1.0으로 회복됩니다.
+  이 구간에는 `gz service .../control` 호출도 타임아웃 나서 데드락으로 오진하기 쉽습니다.
+
+- **URDF를 고쳤는데 반영이 안 된 것처럼 보임**
+  → gz 서버가 두 개 이상 떠 있으면 ROS 브리지가 옛 서버 토픽을 뭅니다.
+  검증 전에 인스턴스가 하나인지 확인하세요:
+  ```bash
+  pgrep -af "gz sim"
+  ```
+  정리할 때 `pkill -f "ros2 launch ugv_bringup"` 류는 **자기 셸의 cmdline까지 매칭해
+  스스로 죽으므로** PID로 kill 하세요.
 
 ---
 
@@ -202,3 +271,14 @@ python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"  # 자동 다운�
 - ros-humble-ros-gz-bridge 0.244.24
 - torch 2.8.0 / ultralytics 8.4.39
 - OpenCV 4.13.0
+
+---
+
+## 동작 검증 환경 (데스크탑)
+- Ubuntu 22.04 x86_64 / ROS2 Humble / RTX 3060
+- **Gazebo Harmonic (gz-sim 8.14.0)** + ros-humble-ros-gzharmonic-* 0.244.12
+- Python 3.10, torch CPU 빌드 (YOLO는 CPU 추론)
+
+검증된 동작: `/scan` 9.8Hz(frame_id=`laser_frame`), `/odom` 50Hz, RGB 15Hz, 열화상 10Hz,
+cmd_vel 주행 및 포탑 구동, SLAM 맵 생성, Nav2 lifecycle 전체 active,
+열화상 화재감지(raw 59881 = 598.8K) → 순찰 정지·포탑 조준 → 화재 구역 우회, RTF 1.0.
