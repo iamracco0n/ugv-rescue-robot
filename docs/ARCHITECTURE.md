@@ -46,7 +46,7 @@ A.R.G.U.S.는 재난 구조 상황(건물 내부 수색)에서 자율적으로 �
 |------|------|
 | 플랫폼 | Ubuntu 22.04 (데스크탑 개발), Jetson Orin aarch64 (실로봇 배포) |
 | ROS 버전 | ROS2 Humble |
-| 시뮬레이터 | Gazebo Harmonic (gz-sim8) — README의 Garden 표기는 구버전 기준 |
+| 시뮬레이터 | Gazebo Harmonic (gz-sim8) |
 | 자율항법 | Nav2 (DWB 로컬 플래너) |
 | SLAM | SLAM Toolbox (online_async) |
 | 컴퓨터 비전 | YOLOv8n-pose (Ultralytics), RandomForest 트리아지 분류기 |
@@ -176,10 +176,13 @@ base_link
 │   │       ├── triage_model_rf_robust.pkl # RandomForest 트리아지 분류기
 │   │       └── triage_scaler_robust.pkl   # 피처 스케일러
 │   │
-│   ├── sllidar_ros2/         # RPLIDAR 드라이버 (실로봇 전용, 빌드 포함)
-│   └── uros/                 # micro-ROS 에이전트 (Teensy MCU 통신)
+│   ├── sllidar_ros2/         # RPLIDAR 드라이버 (실로봇 전용, 저장소 미포함)
+│   └── uros/                 # micro-ROS 에이전트 (실로봇 전용, 저장소 미포함)
 │
-└── UGV_PROJECT_OVERVIEW.md   # 이 문서
+├── README.md                 # 프로젝트 소개
+└── docs/
+    ├── SETUP.md              # 설치 가이드
+    └── ARCHITECTURE.md       # 이 문서
 ```
 
 ---
