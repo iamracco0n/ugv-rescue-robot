@@ -31,8 +31,21 @@
     </inertial>
   </link>
 
+  <!-- 이 로봇은 VelocityControl 플러그인으로 기구학적으로 구동한다(바퀴는 시각 전용).
+       그래서 base_link 는 중력을 끈다.
+
+       주의: 포탑·총열은 revolute 조인트로 연결된 **별도 강체**라 중력이 따로 적용된다.
+       base 만 끄면 포탑 무게(1.2kg)가 모델 전체를 끌어내려 서서히 가라앉고,
+       바닥에 닿는 순간 튕기는데 base 에는 중력이 없어 되돌아오지 못한다.
+       → 로봇이 공중으로 날아가 뒤집힌다. 반드시 세 링크 모두 꺼야 한다. -->
   <gazebo reference="base_link">
     <kinematic>true</kinematic>
+    <gravity>false</gravity>
+  </gazebo>
+  <gazebo reference="turret_link">
+    <gravity>false</gravity>
+  </gazebo>
+  <gazebo reference="gun_link">
     <gravity>false</gravity>
   </gazebo>
 
