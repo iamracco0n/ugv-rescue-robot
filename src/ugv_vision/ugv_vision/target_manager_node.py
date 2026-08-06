@@ -43,11 +43,15 @@ CONFIRM_N        = 3      # 연속 탐지 횟수 — 오탐 방지
 # ── 정지 조준 확인(INSPECT) 파라미터 ──────────────────────────────────
 # 이동 중에 등록하면 로봇 자세·포탑 각도가 계속 변해 위치가 튄다.
 # → 후보를 보면 즉시 정지 요청하고, 멈춘 뒤 포탑을 조준해서 등록한다.
-INSPECT_TRIGGER_N   = 2                   # 정지 요청까지 필요한 연속 탐지 수
+INSPECT_TRIGGER_N   = 3                   # 정지 요청까지 필요한 연속 '탐지 메시지' 수
 INSPECT_SETTLE_SPD  = 0.05                # 정지 판정 속도 (m/s)
 INSPECT_YAW_TOL     = math.radians(4.0)   # 포탑 조준 완료 판정 오차
 INSPECT_SAMPLES     = 5                   # 정지·조준 상태에서 모을 표본 수
-INSPECT_TIMEOUT_S   = 10.0                # 확인 실패 시 포기 (s)
+# 타임아웃은 2단계로 나눈다. 포탑이 반대편(≈180°)을 봐야 하면 슬루에만 3초 가까이
+# 걸리므로 전체 한도는 넉넉히 주되, 일단 멈춰서 겨눈 뒤에도 대상이 안 보이면
+# 유령 후보로 보고 곧바로 포기해 순찰 시간을 낭비하지 않는다.
+INSPECT_TIMEOUT_S   = 14.0                # 전체 한도 (정지 + 포탑 슬루 포함)
+INSPECT_AFTER_AIM_S = 2.5                 # 조준 완료 후 대상이 안 보일 때 포기까지
 
 # 블라인드코너 스캔 파라미터
 SCAN_DWELL_S     = 1.2           # 각 스캔 포인트 체류 시간 (s)
@@ -114,6 +118,7 @@ class TargetManager(Node):
         self.last_seen_t = None
         self.last_manual_t = None
         self._detect_streak = 0
+        self._last_streak_stamp = 0   # 같은 탐지 메시지를 중복으로 세지 않기 위함
 
         self._prev_pitch_vel = 0.0
         self._loop_dt        = 0.05
@@ -139,6 +144,7 @@ class TargetManager(Node):
         self._inspect_start_t     = 0.0
         self._inspect_aim: tuple[float, float] | None = None   # 조준 목표 (map)
         self._inspect_samples: list[tuple[float, float]] = []
+        self._inspect_settled_t: float | None = None   # 정지+조준이 붙은 시각
 
         # ── 환자 등록부 ───────────────────────────────────────────────
         self.confirmed: dict[int, tuple] = {}
@@ -323,10 +329,11 @@ class TargetManager(Node):
             gx, gy = self._estimate_xy(self.last_msg)
             if self._is_known(gx, gy) or self._is_ignored(gx, gy):
                 return
-            self._inspect_active  = True
-            self._inspect_start_t = now_sec
-            self._inspect_aim     = (gx, gy)
-            self._inspect_samples = []
+            self._inspect_active     = True
+            self._inspect_start_t    = now_sec
+            self._inspect_aim        = (gx, gy)
+            self._inspect_samples    = []
+            self._inspect_settled_t  = None
             self._publish_inspect_request(gx, gy)
             self.get_logger().info(
                 f'후보 발견 ({gx:.1f},{gy:.1f}) — 정지 요청 후 조준 확인 시작')
@@ -347,12 +354,21 @@ class TargetManager(Node):
             self._finish_inspect(registered=False)
             return
 
-        if not target_fresh or self.last_msg is None:
+        # 3) 정지 + 조준이 붙었는지 확인 (대상이 안 보여도 정착 여부는 판정)
+        settled = (self.robot_speed <= INSPECT_SETTLE_SPD
+                   and abs(self._aim_yaw_error()) <= INSPECT_YAW_TOL)
+        if settled and self._inspect_settled_t is None:
+            self._inspect_settled_t = now_sec
+
+        # 겨눴는데도 대상이 안 보이면 유령 후보 → 조기 포기
+        if (self._inspect_settled_t is not None and not target_fresh
+                and now_sec - self._inspect_settled_t > INSPECT_AFTER_AIM_S):
+            self.get_logger().info(
+                '조준 완료했는데 대상 없음 — 유령 후보로 판단, 순찰 재개')
+            self._finish_inspect(registered=False)
             return
 
-        # 3) 정지 + 조준 완료 상태에서만 표본 수집
-        aim_err = abs(self._aim_yaw_error())
-        if self.robot_speed > INSPECT_SETTLE_SPD or aim_err > INSPECT_YAW_TOL:
+        if not settled or not target_fresh or self.last_msg is None:
             return
 
         gx, gy = self._estimate_xy(self.last_msg)
@@ -384,10 +400,11 @@ class TargetManager(Node):
         self.inspect_req_pub.publish(p)
 
     def _finish_inspect(self, registered: bool):
-        self._inspect_active  = False
-        self._inspect_aim     = None
-        self._inspect_samples = []
-        self._detect_streak   = 0
+        self._inspect_active    = False
+        self._inspect_aim       = None
+        self._inspect_samples   = []
+        self._inspect_settled_t = None
+        self._detect_streak     = 0
         msg = Bool(); msg.data = bool(registered)
         self.inspect_done_pub.publish(msg)
 
@@ -516,10 +533,16 @@ class TargetManager(Node):
             data_age = float('inf')
         target_fresh = (data_age < MSG_FRESHNESS_S) and (self.last_msg is not None)
 
+        # streak 은 '새 탐지 메시지' 수여야 한다. 제어루프(20Hz) 틱을 세면
+        # 탐지 1건만으로도 1초 안에 20까지 올라가 유령 후보에 멈춰 선다.
         if target_fresh:
-            self._detect_streak += 1
+            stamp = self.last_seen_t.nanoseconds if self.last_seen_t else 0
+            if stamp != self._last_streak_stamp:
+                self._last_streak_stamp = stamp
+                self._detect_streak += 1
         else:
             self._detect_streak = 0
+            self._last_streak_stamp = 0
 
         self._inspect_step(now_sec, target_fresh)
 

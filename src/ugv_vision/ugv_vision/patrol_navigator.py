@@ -212,6 +212,20 @@ class PatrolNavigator(Node):
         except Exception:
             return self.robot_x, self.robot_y
 
+    def _robot_yaw_map(self):
+        """map 프레임 기준 로봇 방위.
+
+        정지 goal 의 위치는 map TF 에서 오는데 방위를 odom(self.robot_theta)에서
+        가져오면 SLAM 보정분만큼 어긋나, Nav2 가 자세를 맞추려고 제자리에서
+        계속 회전한다(정지 판정이 안 됨).
+        """
+        try:
+            q = self._tf_buf.lookup_transform(
+                'map', 'base_footprint', Time()).transform.rotation
+            return _yaw_from_quat(q)
+        except Exception:
+            return self.robot_theta
+
     def _send_goal(self, x, y, yaw=None):
         if yaw is None:
             rx, ry = self._robot_pose()
@@ -228,7 +242,7 @@ class PatrolNavigator(Node):
 
     def _stop_here(self):
         rx, ry = self._robot_pose()
-        self._send_goal(rx, ry, yaw=self.robot_theta)
+        self._send_goal(rx, ry, yaw=self._robot_yaw_map())
 
     # ── 프론티어 탐사 ────────────────────────────────────────────────
     def _find_frontiers(self):
