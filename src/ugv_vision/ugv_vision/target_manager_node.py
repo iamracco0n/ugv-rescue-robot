@@ -17,10 +17,10 @@ import rclpy.time
 import tf2_ros
 from rclpy.duration import Duration
 from rclpy.node import Node
-from geometry_msgs.msg import Point, Vector3
+from geometry_msgs.msg import Point, PointStamped, Vector3
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState, Joy
-from std_msgs.msg import Float64
+from std_msgs.msg import Bool, Float64
 from visualization_msgs.msg import Marker, MarkerArray
 
 from ugv_msgs.msg import TargetDetection
@@ -32,12 +32,22 @@ KP_SRCH      = 2.0              # 스캔 P 게인 (rad/s per rad)
 
 TURRET_HW_LIMIT  = math.radians(355)  # Yaw 소프트 한계 (URDF ±360° − 5° 마진)
 PITCH_SLEW_MAX   = 2.0                # pitch 최대 변화율 (rad/s²)
-CAM_FOV_RAD      = math.radians(87)   # D435i 수평 FOV
+CAM_FOV_RAD      = 1.089              # 기본값: 시뮬 카메라 수평 FOV (ugv.urdf.xacro)
+                                      # 실기 D435i는 87° → 파라미터 cam_fov_rad로 지정
 
 MERGE_M          = 1.5    # 기발견 환자 중복 판정 반경 (m)
 IGNORE_R         = 0.5    # 확인 완료 환자 억제 반경 (m)
 MSG_FRESHNESS_S  = 1.0    # YOLO 신선도 한계 (s)
 CONFIRM_N        = 3      # 연속 탐지 횟수 — 오탐 방지
+
+# ── 정지 조준 확인(INSPECT) 파라미터 ──────────────────────────────────
+# 이동 중에 등록하면 로봇 자세·포탑 각도가 계속 변해 위치가 튄다.
+# → 후보를 보면 즉시 정지 요청하고, 멈춘 뒤 포탑을 조준해서 등록한다.
+INSPECT_TRIGGER_N   = 2                   # 정지 요청까지 필요한 연속 탐지 수
+INSPECT_SETTLE_SPD  = 0.05                # 정지 판정 속도 (m/s)
+INSPECT_YAW_TOL     = math.radians(4.0)   # 포탑 조준 완료 판정 오차
+INSPECT_SAMPLES     = 5                   # 정지·조준 상태에서 모을 표본 수
+INSPECT_TIMEOUT_S   = 10.0                # 확인 실패 시 포기 (s)
 
 # 블라인드코너 스캔 파라미터
 SCAN_DWELL_S     = 1.2           # 각 스캔 포인트 체류 시간 (s)
@@ -84,6 +94,9 @@ class TargetManager(Node):
         self.turret_pub = self.create_publisher(Vector3,     '/turret_cmd',       10)
         self.marker_pub = self.create_publisher(MarkerArray, '/patient_markers',  10)
         self.arrow_pub  = self.create_publisher(Marker,      '/turret_heading',   10)
+        # 정지 조준 확인 핸드셰이크 — patrol_navigator 가 소비
+        self.inspect_req_pub  = self.create_publisher(PointStamped, '/inspect_request', 10)
+        self.inspect_done_pub = self.create_publisher(Bool,         '/inspect_done',    10)
 
         # ── TF2 버퍼 (map → base_footprint 로봇 자세) ────────────────
         self._tf_buf = tf2_ros.Buffer(cache_time=Duration(seconds=30))
@@ -115,6 +128,17 @@ class TargetManager(Node):
         self._scan_idx       = 0
         self._scan_arrive_t: float | None = None
         self._scan_update_t  = 0.0
+
+        # 카메라 수평 FOV — 시뮬 1.089rad(62°) / 실기 D435i 87°
+        self.declare_parameter('cam_fov_rad', CAM_FOV_RAD)
+        self.cam_fov = float(self.get_parameter('cam_fov_rad').value)
+
+        # ── 정지 조준 확인(INSPECT) 상태 ──────────────────────────────
+        self.robot_speed          = 0.0
+        self._inspect_active      = False
+        self._inspect_start_t     = 0.0
+        self._inspect_aim: tuple[float, float] | None = None   # 조준 목표 (map)
+        self._inspect_samples: list[tuple[float, float]] = []
 
         # ── 환자 등록부 ───────────────────────────────────────────────
         self.confirmed: dict[int, tuple] = {}
@@ -149,6 +173,8 @@ class TargetManager(Node):
         self.robot_x     = msg.pose.pose.position.x
         self.robot_y     = msg.pose.pose.position.y
         self.robot_theta = euler_from_quaternion(msg.pose.pose.orientation)
+        v = msg.twist.twist
+        self.robot_speed = math.hypot(v.linear.x, v.linear.y) + abs(v.angular.z) * 0.2
 
     def joint_cb(self, msg):
         for name, pos in zip(msg.name, msg.position):
@@ -169,15 +195,24 @@ class TargetManager(Node):
         map 프레임 로봇 자세로 위치 추정 (odom 드리프트 보정)."""
         if msg.distance < 0.1:
             return
-        rx, ry, rtheta = self._map_frame_robot_pose()
-        pixel_angle = ((msg.x - 320.0) / 320.0) * (CAM_FOV_RAD / 2.0)
-        cam_hdg     = rtheta + msg.capture_turret_yaw + pixel_angle
-        est_gx      = rx + msg.distance * math.cos(cam_hdg)
-        est_gy      = ry + msg.distance * math.sin(cam_hdg)
+        est_gx, est_gy = self._estimate_xy(msg)
         if self._is_ignored(est_gx, est_gy):
             return
         self.last_msg    = msg
         self.last_seen_t = self.get_clock().now()
+
+    def _estimate_xy(self, msg: TargetDetection) -> tuple[float, float]:
+        """탐지 메시지 → map 프레임 추정 좌표.
+
+        픽셀 x는 오른쪽으로 증가하지만 ROS 방위각(yaw)은 반시계(왼쪽)가 +다.
+        따라서 화면 오른쪽(x>중앙)은 방위각이 **감소**해야 한다 → 부호 반전.
+        (부호가 +였을 때 추정 위치가 2~3m 어긋났음. 실측으로 확인)
+        """
+        rx, ry, rtheta = self._map_frame_robot_pose()
+        pixel_angle = -((msg.x - 320.0) / 320.0) * (self.cam_fov / 2.0)
+        cam_hdg     = rtheta + msg.capture_turret_yaw + pixel_angle
+        return (rx + msg.distance * math.cos(cam_hdg),
+                ry + msg.distance * math.sin(cam_hdg))
 
     def _blind_corners_cb(self, msg: MarkerArray):
         """/viz/blind_corners에서 도어·오클루전 엣지 좌표 추출."""
@@ -273,15 +308,105 @@ class TargetManager(Node):
 
     # ── 환자 등록 ─────────────────────────────────────────────────────
 
-    def _try_register(self):
+    # ── 정지 조준 확인(INSPECT) ────────────────────────────────────────
+
+    def _inspect_step(self, now_sec: float, target_fresh: bool):
+        """후보 발견 → 정지 요청 → 조준 완료 후 표본 수집 → 등록.
+
+        이동 중 등록하면 로봇 자세와 포탑 각도가 계속 바뀌어 좌표가 튄다.
+        멈추고 조준한 상태에서만 표본을 모아 중앙값으로 등록한다.
+        """
+        # 1) 시작 조건 — 후보가 연속으로 보이고, 아직 확인 중이 아닐 때
+        if (not self._inspect_active and target_fresh
+                and self._detect_streak >= INSPECT_TRIGGER_N
+                and self.last_msg is not None):
+            gx, gy = self._estimate_xy(self.last_msg)
+            if self._is_known(gx, gy) or self._is_ignored(gx, gy):
+                return
+            self._inspect_active  = True
+            self._inspect_start_t = now_sec
+            self._inspect_aim     = (gx, gy)
+            self._inspect_samples = []
+            self._publish_inspect_request(gx, gy)
+            self.get_logger().info(
+                f'후보 발견 ({gx:.1f},{gy:.1f}) — 정지 요청 후 조준 확인 시작')
+            return
+
+        if not self._inspect_active:
+            return
+
+        # 2) 타임아웃 — 대상을 놓쳤거나 조준이 안 잡히는 경우
+        if now_sec - self._inspect_start_t > INSPECT_TIMEOUT_S:
+            self.get_logger().warn(
+                f'조준 확인 시간초과({INSPECT_TIMEOUT_S:.0f}s) — 표본 '
+                f'{len(self._inspect_samples)}개, 순찰 재개 '
+                f'[속도={self.robot_speed:.3f}m/s(한계{INSPECT_SETTLE_SPD}), '
+                f'조준오차={math.degrees(abs(self._aim_yaw_error())):.1f}°'
+                f'(한계{math.degrees(INSPECT_YAW_TOL):.0f}°), '
+                f'탐지신선={self._detect_streak > 0}]')
+            self._finish_inspect(registered=False)
+            return
+
+        if not target_fresh or self.last_msg is None:
+            return
+
+        # 3) 정지 + 조준 완료 상태에서만 표본 수집
+        aim_err = abs(self._aim_yaw_error())
+        if self.robot_speed > INSPECT_SETTLE_SPD or aim_err > INSPECT_YAW_TOL:
+            return
+
+        gx, gy = self._estimate_xy(self.last_msg)
+        self._inspect_samples.append((gx, gy))
+        # 조준점도 최신 추정으로 갱신 (초기 추정이 부정확했을 수 있음)
+        self._inspect_aim = (gx, gy)
+
+        if len(self._inspect_samples) >= INSPECT_SAMPLES:
+            self._register_from_samples()
+            self._finish_inspect(registered=True)
+
+    def _aim_yaw_error(self) -> float:
+        """현재 포탑 yaw 와 조준 목표 yaw 의 차이(rad)."""
+        if self._inspect_aim is None:
+            return math.inf
+        rx, ry, rtheta = self._map_frame_robot_pose()
+        aim_angle = math.atan2(self._inspect_aim[1] - ry,
+                               self._inspect_aim[0] - rx)
+        err = (aim_angle - rtheta) - self.turret_yaw
+        while err >  math.pi: err -= 2 * math.pi
+        while err < -math.pi: err += 2 * math.pi
+        return err
+
+    def _publish_inspect_request(self, gx, gy):
+        p = PointStamped()
+        p.header.frame_id = 'map'
+        p.header.stamp = self.get_clock().now().to_msg()
+        p.point.x, p.point.y, p.point.z = float(gx), float(gy), 0.5
+        self.inspect_req_pub.publish(p)
+
+    def _finish_inspect(self, registered: bool):
+        self._inspect_active  = False
+        self._inspect_aim     = None
+        self._inspect_samples = []
+        self._detect_streak   = 0
+        msg = Bool(); msg.data = bool(registered)
+        self.inspect_done_pub.publish(msg)
+
+    def _register_from_samples(self):
+        """정지 상태에서 모은 표본의 중앙값으로 등록 — 단발 프레임보다 안정적."""
+        xs = sorted(s[0] for s in self._inspect_samples)
+        ys = sorted(s[1] for s in self._inspect_samples)
+        mid = len(xs) // 2
+        gx, gy = xs[mid], ys[mid]
+        spread = max(math.hypot(x - gx, y - gy)
+                     for x, y in self._inspect_samples)
+        self._try_register(gx, gy, spread)
+
+    def _try_register(self, gx=None, gy=None, spread=None):
         msg = self.last_msg
         if msg is None:
             return
-        rx, ry, rtheta = self._map_frame_robot_pose()
-        pixel_angle = ((msg.x - 320.0) / 320.0) * (CAM_FOV_RAD / 2.0)
-        actual_hdg  = rtheta + msg.capture_turret_yaw + pixel_angle
-        gx = rx + msg.distance * math.cos(actual_hdg)
-        gy = ry + msg.distance * math.sin(actual_hdg)
+        if gx is None or gy is None:
+            gx, gy = self._estimate_xy(msg)
 
         if self._is_known(gx, gy) or self._is_ignored(gx, gy):
             return
@@ -294,9 +419,11 @@ class TargetManager(Node):
         self.ignored_targets.append((gx, gy))
         self.republish_markers()
 
+        prec = f' | 표본{len(self._inspect_samples) or INSPECT_SAMPLES}개 산포{spread:.2f}m' \
+               if spread is not None else ''
         log = (f'[구조 로그] #{pid} {lbl} | '
                f'거리:{msg.distance:.1f}m | '
-               f'위치:({gx:.1f},{gy:.1f}) | {room}')
+               f'위치:({gx:.1f},{gy:.1f}) | {room}{prec}')
         self.get_logger().info(log)
         with open('patient_locations.txt', 'a') as f:
             f.write(log + '\n')
@@ -391,10 +518,10 @@ class TargetManager(Node):
 
         if target_fresh:
             self._detect_streak += 1
-            if self._detect_streak == CONFIRM_N:
-                self._try_register()
         else:
             self._detect_streak = 0
+
+        self._inspect_step(now_sec, target_fresh)
 
         # ── 포탑 방향 결정 (우선순위: apex_aim > 블라인드코너 > 사인파) ─
 
@@ -403,7 +530,17 @@ class TargetManager(Node):
             if (now - self.apex_aim_t).nanoseconds * 1e-9 > 1.0:
                 self.apex_aim = None
 
-        if self.apex_aim is not None:
+        if self._inspect_active and self._inspect_aim is not None:
+            # 정지 조준 확인 중 — 스캔·apex보다 최우선으로 대상에 고정
+            rx, ry, rtheta = self._map_frame_robot_pose()
+            aim_angle  = math.atan2(self._inspect_aim[1] - ry,
+                                    self._inspect_aim[0] - rx)
+            target_yaw = aim_angle - rtheta
+            while target_yaw >  math.pi: target_yaw -= 2 * math.pi
+            while target_yaw < -math.pi: target_yaw += 2 * math.pi
+            target_yaw = max(-TURRET_HW_LIMIT, min(TURRET_HW_LIMIT, target_yaw))
+
+        elif self.apex_aim is not None:
             rx, ry, rtheta = self._map_frame_robot_pose()
             aim_angle  = math.atan2(self.apex_aim.y - ry,
                                     self.apex_aim.x - rx)

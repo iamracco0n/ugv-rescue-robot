@@ -12,7 +12,8 @@ fire_detection_node.py
 ----
   1) /thermal/image_raw (16bit mono) 에서 고온 픽셀(blob) 검출
   2) 같은 픽셀 위치의 depth로 거리 추정 (열화상·depth 동일 링크/해상도/FOV라 1:1 정렬)
-  3) heading = robot_theta + turret_yaw + pixel_angle  로 월드 좌표 투영
+  3) heading = robot_theta + turret_yaw - pixel_offset  로 월드 좌표 투영
+     (픽셀 x는 오른쪽 +, 방위각은 왼쪽 + 이므로 부호 반전)
         (target_manager_node 의 환자 투영과 동일한 규약)
   4) 근처 기존 화재와 병합, 신규면 /fire_alert 발행 (경비 순찰 노드가 반응)
   5) 누적 열장(heatmap)·costmap 장애물 구름·마커를 주기 발행
@@ -253,7 +254,8 @@ class FireDetectionNode(Node):
             if dist is None or not (self.min_range < dist < self.max_range):
                 continue
 
-            pixel_angle = ((cx - self.iw / 2.0) / (self.iw / 2.0)) * (self.fov / 2.0)
+            # 픽셀 x는 오른쪽으로 증가, ROS 방위각은 반시계(왼쪽)가 + → 부호 반전
+            pixel_angle = -((cx - self.iw / 2.0) / (self.iw / 2.0)) * (self.fov / 2.0)
             hdg = rtheta + self.turret_yaw + pixel_angle
             fx = rx + dist * math.cos(hdg)
             fy = ry + dist * math.sin(hdg)
