@@ -27,7 +27,7 @@ from rclpy.duration import Duration
 from rclpy.time import Time
 
 from nav_msgs.msg import OccupancyGrid, Odometry
-from geometry_msgs.msg import PoseStamped, Point, PointStamped
+from geometry_msgs.msg import PoseStamped, Point, PointStamped, Twist
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import Bool
 
@@ -43,6 +43,7 @@ def _yaw_from_quat(q) -> float:
 # 상태
 IDLE, PATROL, MANUAL, FIRE_ALARM = 'IDLE', 'PATROL', 'MANUAL', 'FIRE_ALARM'
 INSPECT = 'INSPECT'      # 조난자 후보 확인 — 정지 후 포탑 조준
+ESCAPE  = 'ESCAPE'       # 장애물 안에 박힘 — 후진으로 탈출
 
 
 class PatrolNavigator(Node):
@@ -76,6 +77,12 @@ class PatrolNavigator(Node):
         self.declare_parameter('goal_clearance',   0.70)    # goal 주변이 자유여야 하는 반경(m)
         # 탐사 goal 은 도달 실패가 흔하므로 wp_timeout(45s)보다 짧게 잡는다.
         self.declare_parameter('explore_goal_timeout', 15.0)
+        # 장애물 탈출
+        self.declare_parameter('stuck_confirm_s', 8.0)      # 이만큼 안 움직이면 박힘으로 판단
+        self.declare_parameter('stuck_move_eps',  0.15)     # 이 이상 움직이면 정상(m)
+        self.declare_parameter('escape_speed',    0.35)     # 후진 속도(m/s)
+        self.declare_parameter('escape_max_s',    5.0)      # 후진 최대 시간(s)
+        self.declare_parameter('escape_min_move', 0.8)      # 이만큼 물러나면 탈출 성공(m)
         # 조난자에 얼마나 가까이 가서 스캔할지
         self.declare_parameter('inspect_standoff', 1.5)     # 대상에서 유지할 거리(m)
         self.declare_parameter('approach_reach',   0.45)    # 접근 지점 도달 판정(m)
@@ -99,6 +106,11 @@ class PatrolNavigator(Node):
         self.approach_reach    = float(self.get_parameter('approach_reach').value)
         self.frontier_reach    = float(self.get_parameter('frontier_reach').value)
         self.explore_timeout   = float(self.get_parameter('explore_goal_timeout').value)
+        self.stuck_confirm_s   = float(self.get_parameter('stuck_confirm_s').value)
+        self.stuck_move_eps    = float(self.get_parameter('stuck_move_eps').value)
+        self.escape_speed      = float(self.get_parameter('escape_speed').value)
+        self.escape_max_s      = float(self.get_parameter('escape_max_s').value)
+        self.escape_min_move   = float(self.get_parameter('escape_min_move').value)
 
         # ── 상태 ─────────────────────────────────────────────────────
         self.state = IDLE
@@ -128,6 +140,11 @@ class PatrolNavigator(Node):
         self._approach_goal = None            # 대상 앞 접근 지점 (x,y)
         self._approach_arrived = False        # 접근 완료 여부
 
+        # 장애물 탈출(ESCAPE) 상태
+        self._stuck_ref = None                # (x, y, t) 마지막으로 움직인 기준점
+        self._escape_start = None
+        self._escape_from = (0.0, 0.0)
+
         # ── TF ───────────────────────────────────────────────────────
         self._tf_buf = tf2_ros.Buffer(cache_time=Duration(seconds=10))
         self._tf_listener = tf2_ros.TransformListener(self._tf_buf, self)
@@ -146,8 +163,14 @@ class PatrolNavigator(Node):
         self.goal_pub   = self.create_publisher(PoseStamped, '/goal_pose',      10)
         self.aim_pub    = self.create_publisher(Point,       '/apex_aim_point', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/patrol_markers', 10)
+        # 장애물 탈출용 — 로봇이 장애물 안에 들어가면 Nav2 는 시작 자세가
+        # 무효라 경로를 못 낸다. 그때만 직접 후진 명령을 낸다.
+        self.cmd_pub    = self.create_publisher(Twist, '/cmd_vel', 10)
 
         self.create_timer(0.5, self.tick)     # 2 Hz FSM
+        # 탈출 명령은 20Hz 로 낸다. Nav2 컨트롤러도 /cmd_vel 에 20Hz 로 0을
+        # 쏘고 있어서, FSM 주기(2Hz)로 보내면 그 사이 0에 묻혀 로봇이 안 움직인다.
+        self.create_timer(0.05, self._escape_cmd_tick)
 
         if self.patrol_mode == 'explore':
             self.get_logger().info(
@@ -421,10 +444,77 @@ class PatrolNavigator(Node):
         return best
 
     # ── FSM ──────────────────────────────────────────────────────────
+    def _escape_cmd_tick(self):
+        """ESCAPE 중에만 20Hz 로 후진 명령을 낸다."""
+        if self.state != ESCAPE:
+            return
+        t = Twist()
+        t.linear.x = -abs(self.escape_speed)
+        self.cmd_pub.publish(t)
+
+    def _update_stuck(self, rx, ry, now) -> bool:
+        """순찰 중인데 실제로 안 움직이면 '박힘' 으로 본다.
+
+        맵 점유로 판정하려 했으나 쓸 수 없었다. 로봇이 잔해 안에 들어가면
+        라이다가 그 안에서 바깥으로 레이를 쏘기 때문에, SLAM 이 로봇이 있는
+        셀을 오히려 자유공간으로 지워버린다. 그래서 '움직여야 하는데 안
+        움직인다' 는 사실 자체로 감지한다. 원인(잔해 박힘·벽 붙음·경로 실패)을
+        가리지 않고 잡히는 장점도 있다.
+        """
+        if self._stuck_ref is None:
+            self._stuck_ref = (rx, ry, now)
+            return False
+        sx, sy, st = self._stuck_ref
+        if math.hypot(rx - sx, ry - sy) > self.stuck_move_eps:
+            self._stuck_ref = (rx, ry, now)     # 움직였으면 기준 갱신
+            return False
+        return now - st > self.stuck_confirm_s
+
+    def _escape_tick(self, rx, ry, now):
+        """후진으로 빠져나온다.
+
+        들어올 때 전진했으므로 후진이 들어온 길을 되짚는 가장 안전한 방향이다.
+        이 상황에서 Nav2 컨트롤러는 명령을 내지 못하므로 /cmd_vel 충돌은 없다.
+        """
+        ex, ey = self._escape_from
+        moved = math.hypot(rx - ex, ry - ey)
+        if moved < self.escape_min_move and now - self._escape_start < self.escape_max_s:
+            return   # 실제 후진 명령은 _escape_cmd_tick 이 20Hz 로 낸다
+        self.cmd_pub.publish(Twist())          # 정지
+        self._stuck_ref = None
+        if moved >= self.escape_min_move:
+            self.get_logger().info(f'탈출 완료 ({moved:.2f}m 후진) — 순찰 재개')
+        else:
+            self.get_logger().warn('후진해도 못 빠져나옴 — 다른 목표로 재시도')
+        self.state = PATROL
+        self._frontier_goal = None
+        self._wp_sent_t = None
+
     def tick(self):
         if not self.map_ready:
             return
         rx, ry = self._robot_pose()
+
+        # 박힘 감지 — 이동해야 하는 PATROL 상태에서만. INSPECT/FIRE_ALARM 은
+        # 일부러 정지해 있는 상태라 제외한다.
+        if self.state == PATROL:
+            if self._update_stuck(rx, ry, self._now()):
+                self.get_logger().warn(
+                    f'{self.stuck_confirm_s:.0f}초간 못 움직임 ({rx:.1f}, {ry:.1f}) '
+                    '— 장애물 박힘으로 보고 후진 탈출')
+                self._escape_start = self._now()
+                self._escape_from = (rx, ry)
+                self.state = ESCAPE
+                # Nav2 를 먼저 멈춘다. 안 그러면 컨트롤러가 20Hz 로 /cmd_vel 에
+                # 계속 명령을 내보내 후진 명령과 경합해 로봇이 거의 안 움직인다.
+                self._stop_here()
+        elif self.state != ESCAPE:
+            self._stuck_ref = None
+
+        if self.state == ESCAPE:
+            self._escape_tick(rx, ry, self._now())
+            self._publish_markers()
+            return
 
         if self.state == IDLE:
             if self.enabled and self.patrol_mode == 'explore':
@@ -635,6 +725,10 @@ class PatrolNavigator(Node):
             banner.action = Marker.ADD
             banner.color.r = 1.0; banner.color.g = 0.9; banner.color.a = 1.0
             banner.text = '👤 확인 중 (정지·조준)'
+        elif self.state == ESCAPE:
+            banner.action = Marker.ADD
+            banner.color.r = 1.0; banner.color.g = 0.5; banner.color.a = 1.0
+            banner.text = '⚠ 장애물 탈출 중'
         else:
             banner.action = Marker.DELETE
         ma.markers.append(banner)
