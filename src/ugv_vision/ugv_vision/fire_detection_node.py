@@ -130,6 +130,8 @@ class FireDetectionNode(Node):
         self.create_subscription(Image,      self.depth_topic,   self.depth_cb,   5)
         self.create_subscription(Image,      self.rgb_topic,     self.rgb_cb,     5)
         self.create_subscription(Odometry,   '/odom',            self.odom_cb,    10)
+        # SLAM 맵 — 화재 추정 위치가 벽 안쪽으로 찍히는 것을 걸러내는 데 사용
+        self.create_subscription(OccupancyGrid, '/map',           self.slam_map_cb, 1)
         self.create_subscription(JointState, '/joint_states',    self.joint_cb,   10)
 
         # ── 발행 ─────────────────────────────────────────────────────
@@ -244,11 +246,21 @@ class FireDetectionNode(Node):
             area = cv2.contourArea(c)
             if area < self.min_blob_area:
                 continue
-            M = cv2.moments(c)
-            if M['m00'] <= 0:
+            mask = np.zeros(hot.shape, np.uint8)
+            cv2.drawContours(mask, [c], -1, 255, -1)
+            ys, xs = np.nonzero(mask)
+            if xs.size == 0:
                 continue
-            cx = M['m10'] / M['m00']
-            cy = M['m01'] / M['m00']
+
+            # 기준 픽셀 = blob 안에서 가장 뜨거운 점.
+            # blob 중심을 쓰면, 문틈으로 볼 때 중심이 앞쪽 벽에 걸쳐
+            # 벽까지의 depth 로 투영돼 화재가 '벽 속'에 저장된다.
+            vals = therm[ys, xs]
+            k = int(np.argmax(vals))
+            cx, cy = float(xs[k]), float(ys[k])
+
+            peak_raw = float(vals[k])
+            peak_k = peak_raw * self.lin_res if therm.dtype != np.uint8 else peak_raw
 
             dist = self._depth_at(cx, cy)
             if dist is None or not (self.min_range < dist < self.max_range):
@@ -260,13 +272,32 @@ class FireDetectionNode(Node):
             fx = rx + dist * math.cos(hdg)
             fy = ry + dist * math.sin(hdg)
 
-            # blob 최고온도 → Kelvin
-            mask = np.zeros(hot.shape, np.uint8)
-            cv2.drawContours(mask, [c], -1, 255, -1)
-            peak_raw = float(therm[mask > 0].max())
-            peak_k = peak_raw * self.lin_res if therm.dtype != np.uint8 else peak_raw
+            if self._on_wall(fx, fy):
+                self.get_logger().info(
+                    f'화재 추정 ({fx:.1f},{fy:.1f}) 이 벽 위 — 가림 판단, 무시',
+                    throttle_duration_sec=5.0)
+                continue
 
             self._register_fire(fx, fy, peak_k)
+
+    def slam_map_cb(self, msg: OccupancyGrid):
+        self._slam_map = msg
+
+    def _on_wall(self, x, y) -> bool:
+        """추정 위치가 SLAM 맵의 점유 셀(벽)인지.
+
+        방 밖에서 문틈으로 열원을 보면 blob 일부가 앞쪽 벽에 걸쳐, 그 픽셀의
+        depth(=벽까지 거리)로 투영돼 화재가 '벽 속'에 저장되곤 했다.
+        실제 화재는 자유공간에 있으므로 벽으로 찍힌 추정은 버린다.
+        """
+        g = getattr(self, '_slam_map', None)
+        if g is None:
+            return False                      # 맵 없으면 판단 보류(통과)
+        ix = int((x - g.info.origin.position.x) / g.info.resolution)
+        iy = int((y - g.info.origin.position.y) / g.info.resolution)
+        if not (0 <= ix < g.info.width and 0 <= iy < g.info.height):
+            return False
+        return g.data[iy * g.info.width + ix] >= 65   # 확실한 점유만 배제
 
     def _depth_at(self, cx, cy):
         """(cx,cy) 주변 창의 중앙값 거리[m]. 없으면 None."""
