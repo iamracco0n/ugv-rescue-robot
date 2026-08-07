@@ -79,8 +79,13 @@ class FireDetectionNode(Node):
         self.declare_parameter('cam_fov_rad', 1.089)
         self.declare_parameter('img_width', 640)
         self.declare_parameter('img_height', 480)
-        self.declare_parameter('max_fire_range', 10.0)           # m, 이보다 멀면 무시
+        # 열화상은 12m 까지 보지만 RGBD depth 의 far clip 은 8m 다(ugv.urdf.xacro).
+        # 그래서 8m 너머 열원은 depth 가 far clip 으로 잘려 8m 지점에 투영되고,
+        # 화재가 실제보다 앞쪽(벽·허공)에 저장됐다. depth 로 실제 잰 범위 안에서만
+        # 등록한다. 더 가까이 가면 순찰 중에 정확히 다시 잡는다.
+        self.declare_parameter('max_fire_range', 7.5)            # m, 이보다 멀면 무시
         self.declare_parameter('min_fire_range', 0.3)
+        self.declare_parameter('depth_max_valid', 7.8)           # 이상은 far clip 포화로 간주
         self.declare_parameter('bloom_radius', 1.4)              # m, 열장이 번지는 반경
         self.declare_parameter('obstacle_radius', 1.3)          # m, nav 회피 반경
         self.declare_parameter('merge_dist', 1.2)               # m, 이 안이면 같은 화재
@@ -98,6 +103,7 @@ class FireDetectionNode(Node):
         self.ih            = int(g('img_height').value)
         self.max_range     = g('max_fire_range').value
         self.min_range     = g('min_fire_range').value
+        self.depth_max_valid = float(g('depth_max_valid').value)
         self.bloom_r       = g('bloom_radius').value
         self.obst_r        = g('obstacle_radius').value
         self.merge_d       = g('merge_dist').value
@@ -316,7 +322,10 @@ class FireDetectionNode(Node):
         patch = d[y0:y1, x0:x1].astype(np.float32)
         if d.dtype == np.uint16:
             patch = patch * 0.001            # mm → m
-        valid = patch[(patch > 0.05) & np.isfinite(patch)]
+        # far clip(8m) 에 포화된 값은 '측정된 거리'가 아니다. 그대로 쓰면
+        # 멀리 있는 열원이 8m 지점(벽·허공)에 투영된다.
+        valid = patch[(patch > 0.05) & np.isfinite(patch)
+                      & (patch < self.depth_max_valid)]
         if valid.size == 0:
             return None
         return float(np.median(valid))
