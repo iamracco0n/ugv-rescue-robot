@@ -86,9 +86,13 @@ class FireDetectionNode(Node):
         self.declare_parameter('max_fire_range', 7.5)            # m, 이보다 멀면 무시
         self.declare_parameter('min_fire_range', 0.3)
         self.declare_parameter('depth_max_valid', 7.8)           # 이상은 far clip 포화로 간주
+        # blob 픽셀 중 depth 가 실제로 측정된 비율이 이보다 낮으면 신뢰 안 함
+        self.declare_parameter('blob_depth_ratio', 0.5)
         self.declare_parameter('bloom_radius', 1.4)              # m, 열장이 번지는 반경
         self.declare_parameter('obstacle_radius', 1.3)          # m, nav 회피 반경
-        self.declare_parameter('merge_dist', 1.2)               # m, 이 안이면 같은 화재
+        # 열원 자체가 1m 안팎 크기라 각도·면에 따라 추정이 2m 넘게 흩어진다.
+        # 1.2m 로는 화재 하나가 3~4건으로 중복 등록됐다.
+        self.declare_parameter('merge_dist', 2.0)               # m, 이 안이면 같은 화재
         self.declare_parameter('confirm_hits', 2)               # 몇 번 봐야 확정
 
         g = self.get_parameter
@@ -103,7 +107,8 @@ class FireDetectionNode(Node):
         self.ih            = int(g('img_height').value)
         self.max_range     = g('max_fire_range').value
         self.min_range     = g('min_fire_range').value
-        self.depth_max_valid = float(g('depth_max_valid').value)
+        self.depth_max_valid  = float(g('depth_max_valid').value)
+        self.blob_depth_ratio = float(g('blob_depth_ratio').value)
         self.bloom_r       = g('bloom_radius').value
         self.obst_r        = g('obstacle_radius').value
         self.merge_d       = g('merge_dist').value
@@ -207,6 +212,12 @@ class FireDetectionNode(Node):
 
     # ── 화재 검출 핵심 ────────────────────────────────────────────────
     def thermal_cb(self, msg: Image):
+        # 프레임 도착 시점의 포탑 각도를 먼저 확보한다.
+        # 투영 직전에 self.turret_yaw 를 읽으면, 포탑이 스윕 중일 때
+        # (최대 1.15 rad/s) 처리 지연만큼 각도가 어긋나 화재 위치가 크게 틀어진다.
+        # yolo_pose_node 가 capture_turret_yaw 로 잡는 것과 같은 문제.
+        capture_yaw = self.turret_yaw
+
         try:
             therm = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
         except Exception as e:
@@ -268,13 +279,13 @@ class FireDetectionNode(Node):
             peak_raw = float(vals[k])
             peak_k = peak_raw * self.lin_res if therm.dtype != np.uint8 else peak_raw
 
-            dist = self._depth_at(cx, cy)
+            dist = self._depth_of_blob(xs, ys)
             if dist is None or not (self.min_range < dist < self.max_range):
                 continue
 
             # 픽셀 x는 오른쪽으로 증가, ROS 방위각은 반시계(왼쪽)가 + → 부호 반전
             pixel_angle = -((cx - self.iw / 2.0) / (self.iw / 2.0)) * (self.fov / 2.0)
-            hdg = rtheta + self.turret_yaw + pixel_angle
+            hdg = rtheta + capture_yaw + pixel_angle
             fx = rx + dist * math.cos(hdg)
             fy = ry + dist * math.sin(hdg)
 
@@ -321,6 +332,36 @@ class FireDetectionNode(Node):
                 return False                  # 한쪽이라도 트여 있으면 벽 표면
         return True                           # 사방이 막힘 = 벽 내부
 
+    def _depth_of_blob(self, xs, ys):
+        """열원 blob **전체 픽셀**의 depth 로 거리 추정. 없으면 None.
+
+        단일 픽셀만 보면 가림 경계에서 1픽셀만 어긋나도 앞쪽 문틀·벽의
+        거리를 집어온다. blob 안에서 실제로 측정된 픽셀이 충분히 많을 때만
+        신뢰하고, 그 중앙값을 쓴다.
+
+        열원이 depth 사거리(8m) 밖이면 blob 픽셀 대부분이 무효가 되므로
+        여기서 자연스럽게 걸러진다 — 멀리 있는 불이 앞쪽 벽에 찍히던 원인.
+        """
+        d = self.latest_depth
+        if d is None or xs.size == 0:
+            return None
+        h, w = d.shape[:2]
+        sx = w / float(self.iw)
+        sy = h / float(self.ih)
+        px = np.clip(np.round(xs * sx).astype(int), 0, w - 1)
+        py = np.clip(np.round(ys * sy).astype(int), 0, h - 1)
+
+        vals = d[py, px].astype(np.float32)
+        if d.dtype == np.uint16:
+            vals = vals * 0.001
+        valid = vals[(vals > 0.05) & np.isfinite(vals)
+                     & (vals < self.depth_max_valid)]
+        # 유효 픽셀이 blob 의 일부에 불과하면 대부분 사거리 밖이거나 가려진
+        # 상황이다. 소수의 앞쪽 물체 거리로 투영하면 안 된다.
+        if valid.size < max(4, int(xs.size * self.blob_depth_ratio)):
+            return None
+        return float(np.median(valid))
+
     def _depth_at(self, cx, cy):
         """(cx,cy) 주변 창의 중앙값 거리[m]. 없으면 None."""
         d = self.latest_depth
@@ -332,19 +373,30 @@ class FireDetectionNode(Node):
         sy = h / float(self.ih)
         px = int(round(cx * sx))
         py = int(round(cy * sy))
+        if not (0 <= px < w and 0 <= py < h):
+            return None
+
+        scale = 0.001 if d.dtype == np.uint16 else 1.0
+
+        def ok(v):
+            # far clip(8m) 포화값은 '측정된 거리'가 아니다.
+            return 0.05 < v < self.depth_max_valid and np.isfinite(v)
+
+        # ① 반드시 '그 픽셀' 의 depth 를 먼저 본다.
+        #    창 전체의 중앙값을 쓰면, 열원이 depth 사거리 밖일 때 창에 걸친
+        #    문틀·벽(≈4m) 이 중앙값이 되어 화재가 그 벽 위에 저장된다.
+        center = float(d[py, px]) * scale
+        if not ok(center):
+            return None
+
+        # ② 잡음 완화용으로만 창을 쓰되, 중앙값과 가까운 값만 평균낸다.
         r = 4
         x0, x1 = max(0, px - r), min(w, px + r + 1)
         y0, y1 = max(0, py - r), min(h, py + r + 1)
-        patch = d[y0:y1, x0:x1].astype(np.float32)
-        if d.dtype == np.uint16:
-            patch = patch * 0.001            # mm → m
-        # far clip(8m) 에 포화된 값은 '측정된 거리'가 아니다. 그대로 쓰면
-        # 멀리 있는 열원이 8m 지점(벽·허공)에 투영된다.
-        valid = patch[(patch > 0.05) & np.isfinite(patch)
-                      & (patch < self.depth_max_valid)]
-        if valid.size == 0:
-            return None
-        return float(np.median(valid))
+        patch = d[y0:y1, x0:x1].astype(np.float32) * scale
+        near = patch[(patch > 0.05) & np.isfinite(patch)
+                     & (np.abs(patch - center) < 0.5)]
+        return float(np.median(near)) if near.size else center
 
     def _register_fire(self, fx, fy, peak_k):
         # 기존 화재와 병합
