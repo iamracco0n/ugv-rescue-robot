@@ -74,6 +74,7 @@ class PatrolNavigator(Node):
         # 조난자에 얼마나 가까이 가서 스캔할지
         self.declare_parameter('inspect_standoff', 1.5)     # 대상에서 유지할 거리(m)
         self.declare_parameter('approach_reach',   0.45)    # 접근 지점 도달 판정(m)
+        self.declare_parameter('frontier_reach',   0.8)     # 프론티어 goal 도달 판정(m)
 
         xs = list(self.get_parameter('waypoints_x').value)
         ys = list(self.get_parameter('waypoints_y').value)
@@ -91,6 +92,7 @@ class PatrolNavigator(Node):
         self.goal_clearance    = float(self.get_parameter('goal_clearance').value)
         self.inspect_standoff  = float(self.get_parameter('inspect_standoff').value)
         self.approach_reach    = float(self.get_parameter('approach_reach').value)
+        self.frontier_reach    = float(self.get_parameter('frontier_reach').value)
 
         # ── 상태 ─────────────────────────────────────────────────────
         self.state = IDLE
@@ -107,7 +109,8 @@ class PatrolNavigator(Node):
 
         # 탐사(frontier) 상태
         self._map_msg = None                  # 최신 OccupancyGrid
-        self._frontier_goal = None            # 현재 향하는 프론티어 (x,y)
+        self._frontier_goal = None            # 현재 향하는 goal (벽에서 당긴 점)
+        self._frontier_src = None             # 그 goal 을 만든 프론티어 중심 (중복 판정용)
         self._frontier_t = 0.0                # 마지막 목표 선정 시각
         self._visited_frontiers: list[tuple] = []
         self._explore_done = False
@@ -387,6 +390,8 @@ class PatrolNavigator(Node):
         """
         best, best_score = None, -1e9
         for fx, fy, n in self._find_frontiers():
+            # 중복 판정은 반드시 '프론티어 중심' 기준. 당겨진 goal 로 비교하면
+            # 같은 프론티어가 매번 새 후보로 통과해 무한 재선택된다.
             if any(math.hypot(fx - vx, fy - vy) < 1.5
                    for vx, vy in self._visited_frontiers):
                 continue
@@ -397,10 +402,13 @@ class PatrolNavigator(Node):
                                    self.frontier_standoff, self.goal_clearance)
             if goal is None:
                 continue           # 접근 가능한 자유공간을 못 찾음 → 건너뜀
+            # 당긴 결과가 로봇 코앞이면 도착 판정이 즉시 서서 제자리걸음이 된다
+            if math.hypot(goal[0] - rx, goal[1] - ry) < self.frontier_reach:
+                continue
             # 크기는 이득, 거리는 비용
             score = n * 0.5 - d
             if score > best_score:
-                best_score, best = score, goal
+                best_score, best = score, (goal, (fx, fy))
         return best
 
     # ── FSM ──────────────────────────────────────────────────────────
@@ -489,7 +497,7 @@ class PatrolNavigator(Node):
         """미탐사 경계로 나아가며 맵을 넓힌다."""
         now = self._now()
         goal = self._frontier_goal
-        reached  = goal is not None and math.hypot(goal[0]-rx, goal[1]-ry) < 1.0
+        reached  = goal is not None and math.hypot(goal[0]-rx, goal[1]-ry) < self.frontier_reach
         timedout = (self._wp_sent_t is not None
                     and now - self._wp_sent_t > self.wp_timeout)
         need_new = (goal is None or reached or timedout
@@ -498,12 +506,16 @@ class PatrolNavigator(Node):
             return
 
         if goal is not None and (reached or timedout):
-            self._visited_frontiers.append(goal)
+            # 방문 기록은 '프론티어 중심' 으로 남긴다 (_pick_frontier 의 중복
+            # 판정 기준과 같아야 한다). goal 로 남기면 같은 곳을 계속 다시 고른다.
+            if self._frontier_src is not None:
+                self._visited_frontiers.append(self._frontier_src)
             if timedout:
                 self.get_logger().warn(
                     f'프론티어 ({goal[0]:.1f},{goal[1]:.1f}) 도달 실패 — 다른 곳으로')
 
-        nxt = self._pick_frontier(rx, ry)
+        picked = self._pick_frontier(rx, ry)
+        nxt = picked[0] if picked else None
         self._frontier_t = now
         if nxt is None:
             if not self._explore_done:
@@ -520,6 +532,7 @@ class PatrolNavigator(Node):
         same = (goal is not None and not reached and not timedout
                 and math.hypot(nxt[0] - goal[0], nxt[1] - goal[1]) < 0.5)
         self._frontier_goal = nxt
+        self._frontier_src  = picked[1]
         if same:
             return
         self._send_goal(nxt[0], nxt[1])
