@@ -289,21 +289,37 @@ class FireDetectionNode(Node):
     def slam_map_cb(self, msg: OccupancyGrid):
         self._slam_map = msg
 
-    def _on_wall(self, x, y) -> bool:
-        """추정 위치가 SLAM 맵의 점유 셀(벽)인지.
+    def _cell(self, g, x, y):
+        ix = int((x - g.info.origin.position.x) / g.info.resolution)
+        iy = int((y - g.info.origin.position.y) / g.info.resolution)
+        if not (0 <= ix < g.info.width and 0 <= iy < g.info.height):
+            return None
+        return g.data[iy * g.info.width + ix]
 
-        방 밖에서 문틈으로 열원을 보면 blob 일부가 앞쪽 벽에 걸쳐, 그 픽셀의
-        depth(=벽까지 거리)로 투영돼 화재가 '벽 속'에 저장되곤 했다.
-        실제 화재는 자유공간에 있으므로 벽으로 찍힌 추정은 버린다.
+    def _on_wall(self, x, y) -> bool:
+        """추정 위치가 '벽 속 깊숙이' 인지 판정.
+
+        주의: 단순히 점유 셀이라고 버리면 안 된다. 화재는 대개 방 구석에 있어
+        추정 위치가 벽에 인접하고, 맵 두께·해상도 때문에 점유 셀로 찍히기
+        쉽다. 실제로 GT (-12,-8) 화재의 정확한 추정 (-11.6,-7.6) 이
+        '벽 위'로 오판돼 버려졌다.
+
+        그래서 사방이 모두 막힌 경우 — 즉 방 안쪽으로도 트인 데가 없는
+        진짜 벽 내부 — 만 배제한다. 벽에 붙은 화재는 통과시킨다.
         """
         g = getattr(self, '_slam_map', None)
         if g is None:
             return False                      # 맵 없으면 판단 보류(통과)
-        ix = int((x - g.info.origin.position.x) / g.info.resolution)
-        iy = int((y - g.info.origin.position.y) / g.info.resolution)
-        if not (0 <= ix < g.info.width and 0 <= iy < g.info.height):
-            return False
-        return g.data[iy * g.info.width + ix] >= 65   # 확실한 점유만 배제
+        v = self._cell(g, x, y)
+        if v is None or v < 65:
+            return False                      # 점유 자체가 아니면 통과
+        r = 0.35
+        for dx, dy in ((r, 0), (-r, 0), (0, r), (0, -r),
+                       (r, r), (r, -r), (-r, r), (-r, -r)):
+            n = self._cell(g, x + dx, y + dy)
+            if n is not None and 0 <= n < 25:
+                return False                  # 한쪽이라도 트여 있으면 벽 표면
+        return True                           # 사방이 막힘 = 벽 내부
 
     def _depth_at(self, cx, cy):
         """(cx,cy) 주변 창의 중앙값 거리[m]. 없으면 None."""

@@ -70,7 +70,12 @@ class PatrolNavigator(Node):
         self.declare_parameter('inspect_timeout', 30.0)     # 확인 상태 최대 유지(초, 접근 포함)
         # 목표점을 벽에서 떼어놓기 — 벽으로 밀고 드는 것 방지
         self.declare_parameter('frontier_standoff', 0.7)    # 프론티어 경계에서 물러설 거리(m)
-        self.declare_parameter('goal_clearance',   0.45)    # goal 주변이 자유여야 하는 반경(m)
+        # Nav2 inflation_radius(0.55) 안쪽 지점을 goal 로 주면 플래너가
+        # "failed to create plan" 으로 거부한다. 원본 맵에선 자유공간이라
+        # 통과하므로, 여유를 inflation 보다 크게 잡아야 한다.
+        self.declare_parameter('goal_clearance',   0.70)    # goal 주변이 자유여야 하는 반경(m)
+        # 탐사 goal 은 도달 실패가 흔하므로 wp_timeout(45s)보다 짧게 잡는다.
+        self.declare_parameter('explore_goal_timeout', 15.0)
         # 조난자에 얼마나 가까이 가서 스캔할지
         self.declare_parameter('inspect_standoff', 1.5)     # 대상에서 유지할 거리(m)
         self.declare_parameter('approach_reach',   0.45)    # 접근 지점 도달 판정(m)
@@ -93,6 +98,7 @@ class PatrolNavigator(Node):
         self.inspect_standoff  = float(self.get_parameter('inspect_standoff').value)
         self.approach_reach    = float(self.get_parameter('approach_reach').value)
         self.frontier_reach    = float(self.get_parameter('frontier_reach').value)
+        self.explore_timeout   = float(self.get_parameter('explore_goal_timeout').value)
 
         # ── 상태 ─────────────────────────────────────────────────────
         self.state = IDLE
@@ -305,7 +311,10 @@ class PatrolNavigator(Node):
             return False
         if clearance <= 0.0:
             return True
-        for dx, dy in ((clearance, 0), (-clearance, 0), (0, clearance), (0, -clearance)):
+        c = clearance
+        d = c * 0.707                      # 대각선도 확인 — 벽 모서리 대비
+        for dx, dy in ((c, 0), (-c, 0), (0, c), (0, -c),
+                       (d, d), (d, -d), (-d, d), (-d, -d)):
             v = self._cell_value(x + dx, y + dy)
             if v is None or v >= 25:      # 미탐사(-1)·점유 둘 다 불가
                 return False
@@ -499,7 +508,7 @@ class PatrolNavigator(Node):
         goal = self._frontier_goal
         reached  = goal is not None and math.hypot(goal[0]-rx, goal[1]-ry) < self.frontier_reach
         timedout = (self._wp_sent_t is not None
-                    and now - self._wp_sent_t > self.wp_timeout)
+                    and now - self._wp_sent_t > self.explore_timeout)
         need_new = (goal is None or reached or timedout
                     or now - self._frontier_t > self.frontier_replan)
         if not need_new:
