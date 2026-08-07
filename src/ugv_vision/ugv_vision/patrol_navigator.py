@@ -67,7 +67,13 @@ class PatrolNavigator(Node):
         self.declare_parameter('patrol_mode', 'explore')
         self.declare_parameter('frontier_min_size', 6)      # 프론티어 최소 셀 수
         self.declare_parameter('frontier_replan_s', 6.0)    # 목표 재선정 주기(초)
-        self.declare_parameter('inspect_timeout', 12.0)     # 확인 상태 최대 유지(초)
+        self.declare_parameter('inspect_timeout', 30.0)     # 확인 상태 최대 유지(초, 접근 포함)
+        # 목표점을 벽에서 떼어놓기 — 벽으로 밀고 드는 것 방지
+        self.declare_parameter('frontier_standoff', 0.7)    # 프론티어 경계에서 물러설 거리(m)
+        self.declare_parameter('goal_clearance',   0.45)    # goal 주변이 자유여야 하는 반경(m)
+        # 조난자에 얼마나 가까이 가서 스캔할지
+        self.declare_parameter('inspect_standoff', 1.5)     # 대상에서 유지할 거리(m)
+        self.declare_parameter('approach_reach',   0.45)    # 접근 지점 도달 판정(m)
 
         xs = list(self.get_parameter('waypoints_x').value)
         ys = list(self.get_parameter('waypoints_y').value)
@@ -81,6 +87,10 @@ class PatrolNavigator(Node):
         self.frontier_min   = int(self.get_parameter('frontier_min_size').value)
         self.frontier_replan = float(self.get_parameter('frontier_replan_s').value)
         self.inspect_timeout = float(self.get_parameter('inspect_timeout').value)
+        self.frontier_standoff = float(self.get_parameter('frontier_standoff').value)
+        self.goal_clearance    = float(self.get_parameter('goal_clearance').value)
+        self.inspect_standoff  = float(self.get_parameter('inspect_standoff').value)
+        self.approach_reach    = float(self.get_parameter('approach_reach').value)
 
         # ── 상태 ─────────────────────────────────────────────────────
         self.state = IDLE
@@ -106,6 +116,8 @@ class PatrolNavigator(Node):
         self._inspect_pos = None              # 확인 중인 후보 (x,y)
         self._inspect_start = None
         self._state_before_inspect = None
+        self._approach_goal = None            # 대상 앞 접근 지점 (x,y)
+        self._approach_arrived = False        # 접근 완료 여부
 
         # ── TF ───────────────────────────────────────────────────────
         self._tf_buf = tf2_ros.Buffer(cache_time=Duration(seconds=10))
@@ -150,17 +162,42 @@ class PatrolNavigator(Node):
             self.get_logger().info('SLAM 맵 수신 — 순찰 준비 완료')
 
     def inspect_req_cb(self, msg: PointStamped):
-        """조난자 후보 발견 → 즉시 정지하고 확인 상태로."""
+        """조난자 후보 발견 → 가까이 접근한 뒤 정지·조준해서 확인.
+
+        멀리서 재면 각도 오차 1°가 거리에 비례해 위치 오차로 커지고, depth 도
+        먼 거리에서 부정확하다. 대상 앞 inspect_standoff 지점까지 접근한 뒤
+        멈춰서 스캔한다.
+        """
         if self.state in (INSPECT, FIRE_ALARM):
             return
-        self._inspect_pos = (msg.point.x, msg.point.y)
+        tx, ty = msg.point.x, msg.point.y
+        rx, ry = self._robot_pose()
+        self._inspect_pos = (tx, ty)
         self._inspect_start = self._now()
         self._state_before_inspect = self.state
         self.state = INSPECT
-        self._stop_here()
-        self.get_logger().info(
-            f'👤 조난자 후보 ({self._inspect_pos[0]:.1f}, {self._inspect_pos[1]:.1f}) '
-            '— 정지, 포탑 조준 확인 중')
+        self._approach_arrived = False
+
+        dist = math.hypot(tx - rx, ty - ry)
+        approach = None
+        if dist > self.inspect_standoff + self.approach_reach:
+            approach = self._pull_back(tx, ty, rx, ry,
+                                       self.inspect_standoff, self.goal_clearance)
+        if approach is None:
+            # 이미 충분히 가깝거나 접근 가능한 자리가 없음 → 그 자리에서 스캔
+            self._approach_goal = None
+            self._approach_arrived = True
+            self._stop_here()
+            self.get_logger().info(
+                f'👤 조난자 후보 ({tx:.1f}, {ty:.1f}) {dist:.1f}m — '
+                '접근 불필요/불가, 현 위치에서 조준 확인')
+        else:
+            self._approach_goal = approach
+            self._send_goal(approach[0], approach[1],
+                            yaw=math.atan2(ty - approach[1], tx - approach[0]))
+            self.get_logger().info(
+                f'👤 조난자 후보 ({tx:.1f}, {ty:.1f}) {dist:.1f}m — '
+                f'({approach[0]:.1f}, {approach[1]:.1f}) 까지 접근 후 확인')
 
     def inspect_done_cb(self, msg: Bool):
         if self.state != INSPECT:
@@ -169,6 +206,8 @@ class PatrolNavigator(Node):
             '조난자 확인 완료 — 순찰 재개' if msg.data
             else '확인 실패(놓침) — 순찰 재개')
         self._inspect_pos = None
+        self._approach_goal = None
+        self._approach_arrived = False
         self._resume_patrol()
 
     def enable_cb(self, msg: Bool):
@@ -244,6 +283,50 @@ class PatrolNavigator(Node):
         rx, ry = self._robot_pose()
         self._send_goal(rx, ry, yaw=self._robot_yaw_map())
 
+    # ── 맵 조회 ──────────────────────────────────────────────────────
+    def _cell_value(self, x, y):
+        """world (x,y) 의 맵 셀 값. 맵 밖이면 None."""
+        g = self._map_msg
+        if g is None:
+            return None
+        ix = int((x - g.info.origin.position.x) / g.info.resolution)
+        iy = int((y - g.info.origin.position.y) / g.info.resolution)
+        if not (0 <= ix < g.info.width and 0 <= iy < g.info.height):
+            return None
+        return g.data[iy * g.info.width + ix]
+
+    def _is_free(self, x, y, clearance=0.0):
+        """(x,y) 가 자유공간인지. clearance>0 이면 주변까지 자유여야 한다."""
+        v = self._cell_value(x, y)
+        if v is None or not (0 <= v < 25):
+            return False
+        if clearance <= 0.0:
+            return True
+        for dx, dy in ((clearance, 0), (-clearance, 0), (0, clearance), (0, -clearance)):
+            v = self._cell_value(x + dx, y + dy)
+            if v is None or v >= 25:      # 미탐사(-1)·점유 둘 다 불가
+                return False
+        return True
+
+    def _pull_back(self, tx, ty, rx, ry, standoff, clearance):
+        """목표점을 로봇 쪽으로 standoff 만큼 당겨 자유공간에 놓는다.
+
+        프론티어 중심이나 조난자 위치는 그 자체가 벽에 붙어 있거나 미탐사
+        영역이라 그대로 goal 로 쓰면 Nav2 가 도달하지 못하고 벽으로 밀고 든다.
+        """
+        d = math.hypot(tx - rx, ty - ry)
+        if d < 1e-3:
+            return None
+        ux, uy = (tx - rx) / d, (ty - ry) / d
+        # standoff 부터 시작해 조금씩 더 당기며 자유공간을 찾는다
+        back = standoff
+        while back < d:
+            px, py = tx - ux * back, ty - uy * back
+            if self._is_free(px, py, clearance):
+                return (px, py)
+            back += 0.25
+        return None
+
     # ── 프론티어 탐사 ────────────────────────────────────────────────
     def _find_frontiers(self):
         """SLAM 맵에서 '알려진 자유공간 ↔ 미탐사' 경계 셀을 군집화해 반환.
@@ -296,7 +379,12 @@ class PatrolNavigator(Node):
         return clusters
 
     def _pick_frontier(self, rx, ry):
-        """가까우면서 충분히 큰 프론티어 선택 (이미 시도한 곳은 제외)."""
+        """가까우면서 충분히 큰 프론티어 선택 (이미 시도한 곳은 제외).
+
+        프론티어 중심은 정의상 미탐사 경계라 그대로 goal 로 쓰면 벽에 붙거나
+        미탐사 셀에 놓여 Nav2 가 도달 실패 → 복구 → 벽으로 밀고 드는 일이
+        반복된다. 로봇 쪽으로 당겨 자유공간에 놓은 점을 goal 로 쓴다.
+        """
         best, best_score = None, -1e9
         for fx, fy, n in self._find_frontiers():
             if any(math.hypot(fx - vx, fy - vy) < 1.5
@@ -305,10 +393,14 @@ class PatrolNavigator(Node):
             d = math.hypot(fx - rx, fy - ry)
             if d < 0.8:            # 코앞은 의미 없음
                 continue
+            goal = self._pull_back(fx, fy, rx, ry,
+                                   self.frontier_standoff, self.goal_clearance)
+            if goal is None:
+                continue           # 접근 가능한 자유공간을 못 찾음 → 건너뜀
             # 크기는 이득, 거리는 비용
             score = n * 0.5 - d
             if score > best_score:
-                best_score, best = score, (fx, fy)
+                best_score, best = score, goal
         return best
 
     # ── FSM ──────────────────────────────────────────────────────────
@@ -348,7 +440,17 @@ class PatrolNavigator(Node):
                     self._goto_current_wp('건너뜀 → 다음')
 
         elif self.state == INSPECT:
-            # 정지 유지 + 포탑이 후보를 보도록 조준점 계속 발행
+            # 접근 단계 — 대상 앞 standoff 지점까지 이동
+            if not self._approach_arrived and self._approach_goal is not None:
+                ax, ay = self._approach_goal
+                if math.hypot(ax - rx, ay - ry) < self.approach_reach:
+                    self._approach_arrived = True
+                    self._stop_here()
+                    d = math.hypot(self._inspect_pos[0] - rx,
+                                   self._inspect_pos[1] - ry) if self._inspect_pos else 0.0
+                    self.get_logger().info(
+                        f'접근 완료 (대상까지 {d:.1f}m) — 정지, 조준 스캔')
+            # 포탑이 후보를 보도록 조준점 계속 발행 (접근 중에도 미리 겨눔)
             if self._inspect_pos is not None:
                 p = Point()
                 p.x, p.y, p.z = self._inspect_pos[0], self._inspect_pos[1], 0.5
@@ -358,6 +460,8 @@ class PatrolNavigator(Node):
                     and self._now() - self._inspect_start > self.inspect_timeout):
                 self.get_logger().warn('확인 응답 없음 — 순찰 재개')
                 self._inspect_pos = None
+                self._approach_goal = None
+                self._approach_arrived = False
                 self._resume_patrol()
 
         elif self.state == MANUAL:
