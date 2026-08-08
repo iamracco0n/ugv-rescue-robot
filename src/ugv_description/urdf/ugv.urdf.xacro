@@ -21,9 +21,17 @@
       <geometry><box size="0.50 0.34 0.14"/></geometry>
       <material name="silver"/>
     </visual>
-    <collision name="base_collision">
-      <geometry><box size="0.50 0.34 0.14"/></geometry>
-    </collision>
+    <!-- collision 없음 — 의도적.
+         이 로봇은 VelocityControl 로 속도를 직접 지정해 움직인다(기구학 구동,
+         바퀴도 시각 전용). 그런데 gz-sim8 은 <kinematic> 태그를 읽지 않아서
+         (libgz-sim8 에 해당 문자열 자체가 없음) 링크가 완전한 동역학 강체로
+         취급된다. 중력까지 꺼둔 상태라 충돌 충격이 감쇠 없이 그대로 남아,
+         한 번 부딪히면 영구히 회전·상승해 로봇이 공중에서 뒹군다.
+         (실측: 벽/장애물 접촉 후 z=3.4m, roll 98°, pitch 83°)
+
+         충돌체를 두어도 기구학 구동이라 어차피 로봇을 막아주지 못하고
+         충격만 받는다. 장애물 회피는 전적으로 LiDAR + Nav2 코스트맵이 담당한다.
+         GpuLidar 는 렌더링 기반이라 visual 을 보므로 감지에도 영향이 없다. -->
     <inertial>
       <mass value="5.0"/>
       <origin xyz="0 0 0"/>
@@ -31,8 +39,21 @@
     </inertial>
   </link>
 
+  <!-- 이 로봇은 VelocityControl 플러그인으로 기구학적으로 구동한다(바퀴는 시각 전용).
+       그래서 base_link 는 중력을 끈다.
+
+       주의: 포탑·총열은 revolute 조인트로 연결된 **별도 강체**라 중력이 따로 적용된다.
+       base 만 끄면 포탑 무게(1.2kg)가 모델 전체를 끌어내려 서서히 가라앉고,
+       바닥에 닿는 순간 튕기는데 base 에는 중력이 없어 되돌아오지 못한다.
+       → 로봇이 공중으로 날아가 뒤집힌다. 반드시 세 링크 모두 꺼야 한다. -->
   <gazebo reference="base_link">
     <kinematic>true</kinematic>
+    <gravity>false</gravity>
+  </gazebo>
+  <gazebo reference="turret_link">
+    <gravity>false</gravity>
+  </gazebo>
+  <gazebo reference="gun_link">
     <gravity>false</gravity>
   </gazebo>
 
@@ -76,9 +97,7 @@
       <geometry><box size="0.06 0.12 0.30"/></geometry>
       <material name="silver"/>
     </visual>
-    <collision>
-      <geometry><box size="0.06 0.12 0.30"/></geometry>
-    </collision>
+    <!-- collision 없음 — base_link 주석 참조 (기구학 구동이라 충격만 받음) -->
     <inertial>
       <mass value="1.0"/>
       <origin xyz="0 0 0"/>
@@ -99,10 +118,7 @@
       <geometry><box size="0.08 0.08 0.06"/></geometry>
       <material name="gray"/>
     </visual>
-    <collision>
-      <origin xyz="0.03 0 -0.02" rpy="0 0 0"/>
-      <geometry><box size="0.08 0.08 0.06"/></geometry>
-    </collision>
+    <!-- collision 없음 — base_link 주석 참조 -->
     <inertial>
       <mass value="0.2"/>
       <origin xyz="0 0 0"/>

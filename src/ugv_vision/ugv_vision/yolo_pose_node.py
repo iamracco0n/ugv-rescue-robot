@@ -72,6 +72,23 @@ class YoloPoseNode(Node):
         else:
             self.get_logger().warn('트리아지 모델 없음 — 규칙 기반으로 동작')
 
+        # ── 오탐(벽·기둥·잔해) 억제 게이트 ────────────────────────────
+        # 벽이 사람으로 잡히던 원인: conf가 낮고(0.25) 키포인트 신뢰도를
+        # 전혀 보지 않아, 코 키포인트 x!=0 하나만 통과하면 등록됐음.
+        self.declare_parameter('det_conf',        0.50)  # YOLO 박스 신뢰도 하한
+        self.declare_parameter('min_kpt_conf',    0.50)  # 키포인트 신뢰도 하한
+        self.declare_parameter('min_valid_kpts',  6)     # 위 기준 통과 키포인트 최소 개수
+        self.declare_parameter('depth_tol',       0.60)  # depth vs 박스크기 추정 허용 상대오차
+        self.declare_parameter('min_box_diag_px', 40.0)  # 너무 작은 박스 제거
+        self.declare_parameter('max_box_diag_px', 900.0) # 화면 전체를 덮는 박스 제거
+        self.det_conf        = float(self.get_parameter('det_conf').value)
+        self.min_kpt_conf    = float(self.get_parameter('min_kpt_conf').value)
+        self.min_valid_kpts  = int(self.get_parameter('min_valid_kpts').value)
+        self.depth_tol       = float(self.get_parameter('depth_tol').value)
+        self.min_box_diag_px = float(self.get_parameter('min_box_diag_px').value)
+        self.max_box_diag_px = float(self.get_parameter('max_box_diag_px').value)
+        self._reject_counts  = {'conf': 0, 'kpt': 0, 'geom': 0, 'depth': 0}
+
         self.label_history  = deque(maxlen=10)
         self.prev_time      = time.time()
         self._turret_yaw    = 0.0   # frame 캡처 시점의 turret_yaw 보관용
@@ -96,7 +113,23 @@ class YoloPoseNode(Node):
             [rgb_sub, depth_sub], queue_size=10, slop=0.1)
         self.ts.registerCallback(self.sync_callback)
 
-        self.get_logger().info('YoloPoseNode 시작 — RGB+Depth 동기화 구독 중')
+        self.create_timer(15.0, self._log_rejects)
+
+        self.get_logger().info(
+            f'YoloPoseNode 시작 — RGB+Depth 동기화 구독 중 '
+            f'(오탐게이트: conf≥{self.det_conf}, 키포인트 {self.min_valid_kpts}개'
+            f'≥{self.min_kpt_conf}, depth오차≤{self.depth_tol:.0%})')
+
+    def _log_rejects(self):
+        """기각 통계 — 게이트가 과하게/모자라게 걸리는지 튜닝용."""
+        if not any(self._reject_counts.values()):
+            return
+        c = self._reject_counts
+        self.get_logger().info(
+            f'[오탐 게이트] 기각 15s: 키포인트={c.get("kpt",0)} '
+            f'박스크기={c.get("geom",0)} depth불일치={c.get("depth",0)}')
+        for k in c:
+            c[k] = 0
 
     def _joint_cb(self, msg: JointState):
         for name, pos in zip(msg.name, msg.position):
@@ -135,6 +168,35 @@ class YoloPoseNode(Node):
         if pixel_diag < 5.0:
             return 0.0
         return (_FOCAL_PX * _BODY_DIAG) / pixel_diag
+
+    # ── 사람 판정 게이트 (벽·기둥 오탐 억제) ─────────────────────────
+    def _person_gate(self, kconf, x1, y1, x2, y2, dist_depth, dist_diag):
+        """사람으로 인정할지 판정. (통과여부, 사유) 반환.
+
+        벽·기둥은 사람 실루엣이 없으므로 키포인트 신뢰도가 전반적으로 낮고,
+        depth로 잰 거리와 박스 크기로 추정한 거리가 크게 어긋난다.
+        (평평한 벽은 가까워도 박스가 작게/크게 제멋대로 잡힘)
+        """
+        # ① 키포인트 신뢰도 — 가장 강한 신호
+        if kconf is not None:
+            n_valid = int((kconf >= self.min_kpt_conf).sum())
+            if n_valid < self.min_valid_kpts:
+                return False, 'kpt'
+
+        # ② 박스 크기 상식 범위
+        w, h = float(x2 - x1), float(y2 - y1)
+        diag = math.hypot(w, h)
+        if not (self.min_box_diag_px <= diag <= self.max_box_diag_px):
+            return False, 'geom'
+
+        # ③ depth 거리 vs 박스크기 추정 거리 정합성
+        #    둘 다 유효할 때만 검사(폴백 상황은 통과시킴)
+        if dist_depth > 0.1 and dist_diag > 0.1:
+            rel = abs(dist_depth - dist_diag) / max(dist_depth, 1e-6)
+            if rel > self.depth_tol:
+                return False, 'depth'
+
+        return True, ''
 
     # ── 스켈레톤 정규화 → 34차원 ─────────────────────────────────────
     def extract_skeleton_features(self, kpts):
@@ -185,25 +247,38 @@ class YoloPoseNode(Node):
         fps = 1.0 / max(now - self.prev_time, 1e-6)
         self.prev_time = now
 
-        results  = self.model(frame, verbose=False, device=self.device, conf=0.25)
+        results  = self.model(frame, verbose=False, device=self.device,
+                              conf=self.det_conf)
         best     = None
         min_dx   = float('inf')
 
         for r in results:
             if r.boxes is None or r.keypoints is None:
                 continue
-            for box, kpts in zip(r.boxes.xyxy.cpu().numpy(),
-                                  r.keypoints.xy.cpu().numpy()):
-                if len(kpts) < 17 or kpts[0][0] == 0:
+            kp_xy   = r.keypoints.xy.cpu().numpy()
+            kp_conf = (r.keypoints.conf.cpu().numpy()
+                       if r.keypoints.conf is not None else [None] * len(kp_xy))
+            for box, kpts, kconf in zip(r.boxes.xyxy.cpu().numpy(), kp_xy, kp_conf):
+                if len(kpts) < 17:
                     continue
                 x1, y1, x2, y2 = map(int, box)
                 cx, cy = (x1+x2)/2.0, (y1+y2)/2.0
 
                 # 1순위: 실제 depth 픽셀값 (미터)
-                dist = self.get_depth(depth_img, cx, cy)
+                dist_depth = self.get_depth(depth_img, cx, cy)
                 # 폴백: depth=0이면 대각선 공식 (누운 사람도 정상 동작)
-                if dist == 0.0:
-                    dist = self.estimate_depth_diagonal(x1, y1, x2, y2)
+                dist_diag  = self.estimate_depth_diagonal(x1, y1, x2, y2)
+                dist = dist_depth if dist_depth > 0.0 else dist_diag
+
+                ok, why = self._person_gate(kconf, x1, y1, x2, y2,
+                                            dist_depth, dist_diag)
+                if not ok:
+                    self._reject_counts[why] = self._reject_counts.get(why, 0) + 1
+                    # 기각된 후보는 회색 점선 박스로만 표시 (튜닝용)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (128, 128, 128), 1)
+                    cv2.putText(frame, f'rej:{why}', (x1, y1 - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
+                    continue
 
                 level, label, color = self.classify(kpts)
 
