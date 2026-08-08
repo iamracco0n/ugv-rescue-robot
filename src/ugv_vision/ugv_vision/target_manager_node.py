@@ -53,6 +53,15 @@ INSPECT_SAMPLES     = 5                   # 정지·조준 상태에서 모을 �
 INSPECT_TIMEOUT_S   = 28.0                # 전체 한도 (대상까지 접근 + 정지 + 포탑 슬루)
 INSPECT_AFTER_AIM_S = 2.5                 # 조준 완료 후 대상이 안 보일 때 포기까지
 MAX_SAMPLE_SPREAD   = 0.30                # 표본이 이보다 흩어지면 등록 보류 (m)
+# 등록을 허용하는 최대 관측 거리.
+# 먼 거리 관측이 등록으로 이어지면 안 된다. 실제로 6.8~14.8m 에서 잡힌
+# 엉터리 투영 4건이 별개 조난자로 등록됐다(모두 같은 사람을 멀리서 잘못
+# 투영한 것). 기각된 사례는 전부 7.0~8.0m 구간이었다.
+# 값은 조사 거리(patrol_navigator inspect_standoff)에 맞춰야 한다.
+# standoff 1.5m 시절엔 4.0 이었으나, 서 있는 사람의 전신이 화면에 들어오도록
+# standoff 를 3.0m 로 늘리면서 실제 관측 거리가 4.0m 까지 올라왔다
+# (상한과 같아 아슬아슬했다). 접근 오차까지 감안해 5.5m 로 둔다.
+MAX_REGISTER_DIST   = 5.5                 # m
 
 # 블라인드코너 스캔 파라미터
 SCAN_DWELL_S     = 1.2           # 각 스캔 포인트 체류 시간 (s)
@@ -436,6 +445,14 @@ class TargetManager(Node):
     def _try_register(self, gx=None, gy=None, spread=None):
         msg = self.last_msg
         if msg is None:
+            return
+        # 먼 거리 관측은 등록하지 않는다. 각도 오차가 거리에 비례해 커지고
+        # depth 도 사거리(8m) 밖이면 폴백 추정이라 좌표가 크게 튄다.
+        if msg.distance > MAX_REGISTER_DIST:
+            self.get_logger().info(
+                f'관측 거리 {msg.distance:.1f}m > {MAX_REGISTER_DIST}m — '
+                '등록 보류 (가까이 접근한 뒤 다시 확인)',
+                throttle_duration_sec=5.0)
             return
         if gx is None or gy is None:
             gx, gy = self._estimate_xy(msg)

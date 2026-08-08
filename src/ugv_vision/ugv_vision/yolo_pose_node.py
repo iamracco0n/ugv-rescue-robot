@@ -22,6 +22,20 @@ _FOCAL_PX   = 535.0
 # 바운딩박스 대각선 기반 폴백: 사람 몸통 대각선 ≈ sqrt(1.7²+0.4²) ≈ 1.75m
 # 누운 자세 / 서 있는 자세 모두 대각선 길이는 유사하게 유지됨
 _BODY_DIAG  = math.sqrt(1.7**2 + 0.4**2)
+_CAM_FOV    = 1.089        # 수평 화각[rad] — urdf 와 일치시킬 것
+
+# 카메라 광학중심의 지면 높이[m]. urdf 관절 누적:
+#   base_footprint→base_link 0.15 + →turret 0.245 + →gun 0.15 + →camera 0.01
+CAM_HEIGHT_M = 0.555
+# 어깨 높이로 자세를 가르는 경계[m] — 시뮬 인체 모델 실측으로 잡았다.
+# 성인 표준(어깨 1.40m)을 가정해 1.25 로 뒀다가 서 있는 여성 모델(1.17~1.18m)
+# 까지 '앉음'으로 삼켜 L2 로 과대평가했다. 실측값:
+#   서있는 여성 1.17~1.18 / 휠체어 0.86~0.88 / 침상 ~0.70 / 바닥누움 0.39~0.41
+# 앉음/누움 경계는 휠체어(0.87)와 침상(0.70) 사이에 둔다.
+LIE_SHOULDER_Z = 0.80
+SIT_SHOULDER_Z = 1.05
+# 이 화소 안쪽에 박스 상단/어깨가 걸리면 '잘림'으로 보고 높이 판정을 포기
+EDGE_CROP_PX   = 6.0
 
 _SKELETON_EDGES = [
     (0,1),(0,2),(1,3),(2,4),
@@ -104,6 +118,8 @@ class YoloPoseNode(Node):
         self.label_history  = deque(maxlen=10)
         self.prev_time      = time.time()
         self._turret_yaw    = 0.0   # frame 캡처 시점의 turret_yaw 보관용
+        self._turret_pitch  = 0.0   # 어깨 높이 환산에 필요(카메라 상하 각)
+        self.cam_fov        = _CAM_FOV
 
         self.pub = self.create_publisher(TargetDetection, '/target_detection', 10)
         # 감지 오버레이 이미지(사람 박스+골격+트리아지) → rqt_image_view / RViz Image
@@ -147,6 +163,36 @@ class YoloPoseNode(Node):
         for name, pos in zip(msg.name, msg.position):
             if name == 'turret_yaw_joint':
                 self._turret_yaw = pos
+            elif name == 'turret_pitch_joint':
+                self._turret_pitch = pos
+
+    def _shoulder_height(self, sh_px_y, dist, box=None):
+        """어깨의 지면 기준 실제 높이[m]. 못 구하면 None.
+
+        휠체어 환자는 다리가 의자·바퀴에 가려 YOLO 가 무릎/발목을 기립 자세로
+        지어낸다(실측: 허벅지/몸통 0.77, 정강이/허벅지 0.97 — 서있음과 동일).
+        그래서 2D 골격 비율로는 어떤 임계값을 써도 앉음을 가려낼 수 없다.
+        어깨 높이는 다리 가림과 무관하므로 이 경우의 유일한 신뢰 단서다.
+          서있는 성인 어깨 ≈ 1.35~1.50 m / 앉은 사람 어깨 ≈ 0.95~1.20 m
+        """
+        if dist is None or dist <= 0.0:
+            return None
+        # 상단이 잘린 사람에게는 쓸 수 없다.
+        # 카메라가 지면 0.555m·세로화각 48.8° 라 거리 d 에서 보이는 최대 높이는
+        # 0.555 + 0.45*d. 조사 거리 2m 면 1.46m 까지만 보여 서 있는 성인의
+        # 머리(1.65m)가 프레임 밖으로 잘리고, YOLO 가 어깨를 실제보다 아래에
+        # 찍는다(실측 0.85m, 참값 1.40m). 이때 높이를 믿으면 서 있는 사람이
+        # 전부 '앉음'으로 판정돼 L2 로 과대평가된다.
+        if box is not None and box[1] <= EDGE_CROP_PX:
+            return None
+        if sh_px_y <= EDGE_CROP_PX:
+            return None
+        # 핀홀 모델(선형 근사 아님): 화면 중심에서의 화소 오프셋 → 각도
+        focal_py = 240.0 / math.tan(
+            math.atan(math.tan(self.cam_fov / 2.0) * 480.0 / 640.0))
+        elev = math.atan((239.5 - sh_px_y) / focal_py)
+        # turret_pitch 는 +Y 축 회전 = 카메라가 아래를 봄 → 세계 기준 각은 뺀다
+        return CAM_HEIGHT_M + dist * math.tan(elev - self._turret_pitch)
 
     # ── Depth 거리 측정 (실제 Z 값, 미터 단위) ───────────────────────
     def get_depth(self, depth_img, cx, cy):
@@ -230,7 +276,7 @@ class YoloPoseNode(Node):
         return np.array([feat])
 
     # ── 트리아지 분류 ────────────────────────────────────────────────
-    def _posture(self, kpts, kconf):
+    def _posture(self, kpts, kconf, dist=None, box=None):
         """골격 기하로 자세를 판정. 'lying' | 'sitting' | 'standing' | None.
 
         트리아지 RandomForest 는 서있음/누움 위주로 학습돼 있어, 앉은 자세를
@@ -288,11 +334,31 @@ class YoloPoseNode(Node):
         if kn is not None and an is not None:
             shin = math.hypot(an[0] - kn[0], an[1] - kn[1])
 
+        sh_z = self._shoulder_height(sh[1], dist, box)
         self.get_logger().info(
             f'[자세] 몸통기울기 {torso_from_vertical:.0f}° 몸통-허벅지 {bend:.0f}° '
             f'몸통 {tl:.0f}px 허벅지 {ll:.0f}px 정강이 {shin:.0f}px '
-            f'허벅지/몸통 {ll/tl:.2f} 정강이/허벅지 {shin/max(ll,1e-6):.2f}',
+            f'허벅지/몸통 {ll/tl:.2f} 정강이/허벅지 {shin/max(ll,1e-6):.2f} '
+            f'어깨높이 {"?" if sh_z is None else f"{sh_z:.2f}m"} '
+            f'(어깨py {sh[1]:.0f} 거리 {0.0 if dist is None else dist:.2f}m '
+            f'피치 {self._turret_pitch:+.3f})',
             throttle_duration_sec=3.0)
+
+        # 다리가 가려져 골격 비율이 통하지 않는 경우(휠체어)의 결정적 단서.
+        # 몸통이 서 있어 보여도 어깨가 낮으면 서 있는 것이 아니다.
+        # 다만 '낮다'를 전부 앉음으로 보면 안 된다 — 누운 사람의 어깨는 더
+        # 낮으며, 침상 환자를 머리·발 쪽에서 보면 몸통이 짧게 투영돼
+        # 수직처럼 잡혀 누움 판정을 그냥 통과한다. 그때 앉음(L2)으로
+        # 분류하면 L1 을 놓친다(실측: 침상 환자가 L1 → L2 로 퇴행).
+        # 어깨 높이를 잴 수 있으면 그것을 우선한다. 다리 비율은 가림에
+        # 취약해서(휠체어 바퀴·침대) 기립과 똑같은 값이 나오지만, 어깨
+        # 높이는 같은 조건에서도 0.87m 로 정확히 나왔다. 아래 비율 규칙은
+        # 어깨를 못 재는 경우(프레임 잘림)의 대체 수단으로 남긴다.
+        if sh_z is not None and torso_from_vertical < 35.0:
+            if sh_z < LIE_SHOULDER_Z:
+                return 'lying'
+            if sh_z < SIT_SHOULDER_Z:
+                return 'sitting'
 
         # 옆에서 보면 몸통과 허벅지가 크게 꺾인다
         if bend > 45.0:
@@ -314,15 +380,16 @@ class YoloPoseNode(Node):
             # 프레임 아래로 잘리거나 바퀴에 가려 발목 키포인트가 자주 빠진다.
             # 이때는 허벅지/몸통 비율만으로 판단한다.
             # 실측: 서있음 0.72~0.74 / 앉음 0.42~0.56.
-            # 다만 이 단서 하나로는 약해서, 부분 관측된 서있는 사람이
-            # 앉음으로 넘어가 L2 로 과대평가되는 사례가 나왔다.
-            # → 임계를 0.58 로 좁히고, 몸통이 35px 이상 제대로 잡힌
-            #   관측에서만 적용한다(작게 잡힌 골격은 비율이 부정확).
-            if ll / tl < 0.58:
+            # 과대평가가 걱정돼 0.58 로 좁혔더니 휠체어가 다시 L3 로 퇴행했다
+            # (앉음 실측 상한이 0.56 이라 여유가 없었다).
+            # 과대평가의 실제 원인은 '먼 거리의 부정확한 골격' 이었고, 그건
+            # 등록 거리 상한(target_manager MAX_REGISTER_DIST 4m)에서 막는다.
+            # 여기서는 앉음을 놓치지 않는 쪽을 택한다.
+            if ll / tl < 0.62:
                 return 'sitting'
         return 'standing'
 
-    def classify(self, kpts, kconf=None):
+    def classify(self, kpts, kconf=None, dist=None, box=None):
         feat = self.extract_skeleton_features(kpts)
         if self.classifier and self.scaler:
             pred  = self.classifier.predict(self.scaler.transform(feat))[0]
@@ -334,7 +401,7 @@ class YoloPoseNode(Node):
         # 앉은 자세는 학습 데이터에 없어 모델이 L3 로 흘려보내지만,
         # 스스로 못 걷는 상태이므로 최소 L2(Urgent) 로 본다.
         if self.posture_rule:
-            p = self._posture(kpts, kconf)
+            p = self._posture(kpts, kconf, dist, box)
             if p == 'sitting' and level > 2:
                 level = 2
             elif p == 'lying' and level > 1:
@@ -395,7 +462,8 @@ class YoloPoseNode(Node):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
                     continue
 
-                level, label, color = self.classify(kpts, kconf)
+                level, label, color = self.classify(kpts, kconf, dist,
+                                                    (x1, y1, x2, y2))
 
                 # 시각화
                 cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
