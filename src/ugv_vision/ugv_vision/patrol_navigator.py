@@ -30,6 +30,7 @@ from rclpy.duration import Duration
 from rclpy.time import Time
 
 from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped, Point, PointStamped, Twist
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import Bool
@@ -94,6 +95,14 @@ class PatrolNavigator(Node):
         self.declare_parameter('max_scan_dist',    3.0)
         self.declare_parameter('approach_reach',   0.45)    # 접근 지점 도달 판정(m)
         self.declare_parameter('frontier_reach',   0.8)     # 프론티어 goal 도달 판정(m)
+        # ── 시야 커버리지 ────────────────────────────────────────────
+        # 라이다(360deg 25m)는 문틈으로 방 안까지 다 그려버린다. 그래서
+        # 라이다 프론티어만 쫓으면 "매핑은 됐지만 카메라로는 들여다본 적 없는"
+        # 방이 생기고, 조난자를 지나친다. 카메라가 실제로 훑은 격자를 따로
+        # 관리해서, 라이다 프론티어가 없어도 안 본 구역으로 계속 들어간다.
+        self.declare_parameter('cam_see_range', 4.5)        # 유효 관측 거리(m)
+        self.declare_parameter('cam_fov_rad',   1.089)      # 카메라 수평 FOV
+        self.declare_parameter('visual_min_size', 25)       # 미관측 군집 최소 셀 수
 
         xs = list(self.get_parameter('waypoints_x').value)
         ys = list(self.get_parameter('waypoints_y').value)
@@ -120,6 +129,9 @@ class PatrolNavigator(Node):
         self.escape_speed      = float(self.get_parameter('escape_speed').value)
         self.escape_max_s      = float(self.get_parameter('escape_max_s').value)
         self.escape_min_move   = float(self.get_parameter('escape_min_move').value)
+        self.cam_range         = float(self.get_parameter('cam_see_range').value)
+        self.cam_fov           = float(self.get_parameter('cam_fov_rad').value)
+        self.visual_min        = int(self.get_parameter('visual_min_size').value)
 
         # ── 상태 ─────────────────────────────────────────────────────
         self.state = IDLE
@@ -144,6 +156,11 @@ class PatrolNavigator(Node):
         self._sweeps = 0                      # 건물 전체를 훑은 횟수
         self._victims: dict[int, tuple] = {}  # 확정 조난자 {pid: (x, y, label)}
         self._fires_seen: list[tuple] = []    # 확정 화재 [(x, y)]
+
+        # 시야 커버리지 — SLAM 맵과 같은 격자에 정렬해서 유지한다
+        self._seen = None                     # bool 배열 (h, w)
+        self._seen_geom = None                # (w, h, res, ox, oy) — 바뀌면 재정렬
+        self._turret_yaw = 0.0
 
         # 조난자 확인(INSPECT) 상태
         self._inspect_pos = None              # 확인 중인 후보 (x,y)
@@ -173,6 +190,8 @@ class PatrolNavigator(Node):
         # 열원 확인 핸드셰이크 (fire_detection_node) — 조난자와 같은 흐름,
         # 다만 불에는 너무 가까이 붙지 않도록 standoff 를 따로 둔다
         self.create_subscription(PointStamped, '/fire_candidate',    self.fire_cand_cb, 10)
+        # 카메라가 어디를 보는지 알아야 시야 커버리지를 칠할 수 있다
+        self.create_subscription(JointState, '/joint_states', self.joint_cb, 10)
         # 수색 결과 요약 보고용 — 확정된 조난자·화재 목록
         self.create_subscription(MarkerArray,  '/patient_markers', self.victims_cb, 10)
         self.create_subscription(PointStamped, '/fire_alert',      self.fire_seen_cb, 10)
@@ -271,6 +290,87 @@ class PatrolNavigator(Node):
             self.get_logger().info(
                 f'{label} ({tx:.1f}, {ty:.1f}) {dist:.1f}m — '
                 f'({approach[0]:.1f}, {approach[1]:.1f}) 까지 접근 후 확인')
+
+    def joint_cb(self, msg: JointState):
+        for name, pos in zip(msg.name, msg.position):
+            if name == 'turret_yaw_joint':
+                self._turret_yaw = pos
+
+    # ── 시야 커버리지 ────────────────────────────────────────────────
+    def _sync_seen(self, g):
+        """SLAM 맵 격자가 바뀌면(맵이 자라면) 커버리지 격자를 재정렬한다."""
+        geom = (g.info.width, g.info.height, g.info.resolution,
+                g.info.origin.position.x, g.info.origin.position.y)
+        if self._seen_geom == geom:
+            return
+        new = np.zeros((g.info.height, g.info.width), dtype=bool)
+        if self._seen is not None and self._seen_geom is not None:
+            ow, oh, _ores, oox, ooy = self._seen_geom
+            # 기존 커버리지를 새 격자 좌표로 옮긴다 (해상도는 동일 전제)
+            dx = int(round((oox - geom[3]) / geom[2]))
+            dy = int(round((ooy - geom[4]) / geom[2]))
+            h = min(oh, geom[1] - dy)
+            w = min(ow, geom[0] - dx)
+            if h > 0 and w > 0 and dx >= 0 and dy >= 0:
+                new[dy:dy + h, dx:dx + w] = self._seen[:h, :w]
+        self._seen = new
+        self._seen_geom = geom
+
+    def _update_seen(self, rx, ry):
+        """카메라 FOV 부채꼴을 '봤음' 으로 칠한다. 벽에 막히면 거기서 끊는다."""
+        g = self._map_msg
+        if g is None:
+            return
+        self._sync_seen(g)
+        res = g.info.resolution
+        ox, oy = g.info.origin.position.x, g.info.origin.position.y
+        W, H = g.info.width, g.info.height
+        occ = np.asarray(g.data, dtype=np.int16).reshape(H, W) >= 65
+
+        cam = self._robot_yaw_map() + self._turret_yaw
+        half = self.cam_fov / 2.0
+        n_rays = 21
+        step = res * 0.9
+        for i in range(n_rays):
+            a = cam - half + i * self.cam_fov / (n_rays - 1)
+            ca, sa = math.cos(a), math.sin(a)
+            d = 0.3
+            while d <= self.cam_range:
+                ix = int((rx + d * ca - ox) / res)
+                iy = int((ry + d * sa - oy) / res)
+                if not (0 <= ix < W and 0 <= iy < H):
+                    break
+                if occ[iy, ix]:
+                    break                      # 벽 뒤는 못 본다
+                self._seen[iy, ix] = True
+                d += step
+
+    def _find_visual_frontiers(self):
+        """자유공간인데 카메라로 아직 안 본 구역의 군집 중심.
+
+        라이다 프론티어가 다 없어져도(=매핑 완료) 여기 남아 있으면
+        아직 수색이 끝난 게 아니다. 방을 실제로 들여다보게 만드는 핵심.
+        """
+        g = self._map_msg
+        if g is None or self._seen is None:
+            return []
+        W, H = g.info.width, g.info.height
+        res = g.info.resolution
+        ox, oy = g.info.origin.position.x, g.info.origin.position.y
+        arr = np.asarray(g.data, dtype=np.int16).reshape(H, W)
+        target = (arr >= 0) & (arr < 25) & (~self._seen)
+        if not target.any():
+            return []
+        lbl, n = ndimage.label(target, structure=np.ones((3, 3), dtype=bool))
+        if n == 0:
+            return []
+        sizes = np.bincount(lbl.ravel())
+        idx = [i for i in range(1, n + 1) if sizes[i] >= self.visual_min]
+        if not idx:
+            return []
+        cents = ndimage.center_of_mass(target, lbl, idx)
+        return [(ox + (c[1] + 0.5) * res, oy + (c[0] + 0.5) * res, int(sizes[i]))
+                for c, i in zip(cents, idx)]
 
     def victims_cb(self, msg: MarkerArray):
         """target_manager 가 발행하는 환자 마커에서 확정 목록을 뽑는다."""
@@ -433,7 +533,7 @@ class PatrolNavigator(Node):
         """
         vics = sorted(self._victims.items())
         fires = list(self._fires_seen)
-        lines = [f'━━ 수색 {sweep_n}회차 완료 — 미탐사 구역 없음 ━━',
+        lines = [f'━━ 수색 {sweep_n}회차 완료 — 미탐사·미관측 구역 없음 ━━',
                  f'  조난자 {len(vics)}명, 화재 {len(fires)}건']
         for pid, (x, y, lbl) in vics:
             lines.append(f'   · #{pid} {lbl} ({x:.1f}, {y:.1f})')
@@ -513,8 +613,18 @@ class PatrolNavigator(Node):
         미탐사 셀에 놓여 Nav2 가 도달 실패 → 복구 → 벽으로 밀고 드는 일이
         반복된다. 로봇 쪽으로 당겨 자유공간에 놓은 점을 goal 로 쓴다.
         """
+        cands = self._find_frontiers()
+        kind = '미탐사 경계'
+        if not cands:
+            # 라이다로는 다 그렸지만 카메라로 안 본 구역이 남아 있으면 거기로.
+            # 라이다는 문틈으로 방 안을 그려버리므로, 이게 없으면 방을 들여다
+            # 보지도 않고 "수색 완료" 로 넘어간다.
+            cands = self._find_visual_frontiers()
+            kind = '미관측 구역'
+        self._last_goal_kind = kind
+
         best, best_score = None, -1e9
-        for fx, fy, n in self._find_frontiers():
+        for fx, fy, n in cands:
             # 중복 판정은 반드시 '프론티어 중심' 기준. 당겨진 goal 로 비교하면
             # 같은 프론티어가 매번 새 후보로 통과해 무한 재선택된다.
             if any(math.hypot(fx - vx, fy - vy) < 1.5
@@ -587,6 +697,10 @@ class PatrolNavigator(Node):
         if not self.map_ready:
             return
         rx, ry = self._robot_pose()
+
+        # 카메라가 지금 보고 있는 부채꼴을 '봤음' 으로 기록.
+        # 확인·경보 중(정지 상태)에도 포탑이 돌며 훑으므로 항상 갱신한다.
+        self._update_seen(rx, ry)
 
         # 박힘 감지 — 이동해야 하는 PATROL 상태에서만. INSPECT/FIRE_ALARM 은
         # 일부러 정지해 있는 상태라 제외한다.
@@ -731,7 +845,8 @@ class PatrolNavigator(Node):
         self._wp_sent_t = now
         self.get_logger().info(
             f'탐사 목표 → ({nxt[0]:.1f}, {nxt[1]:.1f})  '
-            f'[미방문 경계 기준, 누적 방문 {len(self._visited_frontiers)}곳]')
+            f'[{getattr(self, "_last_goal_kind", "미탐사 경계")} 기준, '
+            f'누적 방문 {len(self._visited_frontiers)}곳]')
 
     def _goto_current_wp(self, reason=''):
         wx, wy = self.waypoints[self.wp_idx]

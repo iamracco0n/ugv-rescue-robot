@@ -89,6 +89,11 @@ class YoloPoseNode(Node):
         self.max_box_diag_px = float(self.get_parameter('max_box_diag_px').value)
         self._reject_counts  = {'conf': 0, 'kpt': 0, 'geom': 0, 'depth': 0}
 
+        # 골격 기하로 자세(누움/앉음)를 판정해 트리아지 모델 결과를 보정할지.
+        # 모델이 앉은 자세를 학습하지 않아 휠체어 환자가 L3(정상)로 나왔다.
+        self.declare_parameter('posture_rule', True)
+        self.posture_rule = bool(self.get_parameter('posture_rule').value)
+
         self.label_history  = deque(maxlen=10)
         self.prev_time      = time.time()
         self._turret_yaw    = 0.0   # frame 캡처 시점의 turret_yaw 보관용
@@ -218,13 +223,81 @@ class YoloPoseNode(Node):
         return np.array([feat])
 
     # ── 트리아지 분류 ────────────────────────────────────────────────
-    def classify(self, kpts):
+    def _posture(self, kpts, kconf):
+        """골격 기하로 자세를 판정. 'lying' | 'sitting' | 'standing' | None.
+
+        트리아지 RandomForest 는 서있음/누움 위주로 학습돼 있어, 앉은 자세를
+        넣으면 가까운 쪽(대개 L3:Normal)으로 떨어진다. 실제로 휠체어 환자가
+        초록(정상)으로 표시됐다. 모델을 다시 학습시킬 데이터가 없으므로,
+        판별이 명확한 기하 특징으로 자세를 먼저 가른다.
+
+        · 몸통(어깨중점→엉덩이중점)이 수평에 가까우면  → 누움
+        · 몸통과 다리(엉덩이→발목)가 이루는 각이 90도 근처면 → 앉음
+          (서 있으면 몸통과 다리가 거의 일직선 = 180도)
+        """
+        def ok(i):
+            return (kconf is None or kconf[i] >= self.min_kpt_conf) and kpts[i][0] > 0
+
+        def mid(a, b):
+            if ok(a) and ok(b):
+                return ((kpts[a][0] + kpts[b][0]) / 2.0,
+                        (kpts[a][1] + kpts[b][1]) / 2.0)
+            if ok(a):
+                return (kpts[a][0], kpts[a][1])
+            if ok(b):
+                return (kpts[b][0], kpts[b][1])
+            return None
+
+        sh, hp = mid(5, 6), mid(11, 12)
+        kn, an = mid(13, 14), mid(15, 16)
+        if sh is None or hp is None:
+            return None
+
+        # 이미지 y 는 아래로 증가 → 위쪽이 음수
+        tx, ty = hp[0] - sh[0], hp[1] - sh[1]
+        tl = math.hypot(tx, ty)
+        if tl < 8.0:
+            return None
+        torso_from_vertical = math.degrees(math.acos(min(1.0, abs(ty) / tl)))
+        if torso_from_vertical > 55.0:
+            return 'lying'
+
+        # 다리 방향은 반드시 '허벅지'(엉덩이→무릎)로 잰다.
+        # 발목까지 쓰면 앉은 자세에서 종아리가 아래로 내려가 벡터가 대각선이
+        # 되고, 각이 충분히 안 벌어져 서있음으로 오판한다(실측 36도).
+        # 허벅지로 재면 같은 자세가 85도로 명확히 갈린다.
+        leg_end = kn or an
+        if leg_end is None:
+            return None
+        lx, ly = leg_end[0] - hp[0], leg_end[1] - hp[1]
+        ll = math.hypot(lx, ly)
+        if ll < 8.0:
+            return None
+        cosang = (tx * lx + ty * ly) / (tl * ll)
+        bend = math.degrees(math.acos(max(-1.0, min(1.0, cosang))))
+        # 서 있으면 몸통과 허벅지가 거의 일직선(0도 근처), 앉으면 90도로 꺾인다
+        if bend > 45.0:
+            return 'sitting'
+        return 'standing'
+
+    def classify(self, kpts, kconf=None):
         feat = self.extract_skeleton_features(kpts)
         if self.classifier and self.scaler:
             pred  = self.classifier.predict(self.scaler.transform(feat))[0]
             level = int(str(pred).split('_')[0])
         else:
             level = 3
+
+        # 기하 판정이 명확한 경우 모델 결과를 덮어쓴다.
+        # 앉은 자세는 학습 데이터에 없어 모델이 L3 로 흘려보내지만,
+        # 스스로 못 걷는 상태이므로 최소 L2(Urgent) 로 본다.
+        if self.posture_rule:
+            p = self._posture(kpts, kconf)
+            if p == 'sitting' and level > 2:
+                level = 2
+            elif p == 'lying' and level > 1:
+                level = 1
+
         label, color = _TRIAGE_MAP.get(level, ('Unknown', (255,255,255)))
         return level, label, color
 
@@ -280,7 +353,7 @@ class YoloPoseNode(Node):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
                     continue
 
-                level, label, color = self.classify(kpts)
+                level, label, color = self.classify(kpts, kconf)
 
                 # 시각화
                 cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
