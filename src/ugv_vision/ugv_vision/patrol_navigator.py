@@ -21,6 +21,9 @@ patrol_navigator.py
 
 import math
 
+import numpy as np
+from scipy import ndimage
+
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
@@ -465,6 +468,10 @@ class PatrolNavigator(Node):
 
         맵을 미리 알 필요 없이, 지금까지 그린 지도의 가장자리로 나아가며
         스스로 탐사 범위를 넓힌다. 반환: [(x, y, 셀수), ...] (map 좌표)
+
+        numpy/scipy 로 벡터화되어 있다. 순수 파이썬 이중 루프 + BFS 로 짜면
+        셀 수에 비례해 급격히 느려져, 맵을 키우면 2Hz FSM 주기를 넘겨버린다.
+        (556x396=22만 셀에서 이미 수백 ms) 큰 맵을 쓰려면 이 벡터화가 전제다.
         """
         grid = self._map_msg
         if grid is None:
@@ -472,43 +479,32 @@ class PatrolNavigator(Node):
         w, h = grid.info.width, grid.info.height
         res  = grid.info.resolution
         ox, oy = grid.info.origin.position.x, grid.info.origin.position.y
-        data = grid.data
 
-        # 자유(0..occ_thresh) 셀 중 상하좌우에 미탐사(-1)가 붙은 셀 = 프론티어
-        frontier_cells = []
-        for iy in range(1, h - 1):
-            row = iy * w
-            for ix in range(1, w - 1):
-                if not (0 <= data[row + ix] < 25):
-                    continue
-                if (data[row + ix + 1] == -1 or data[row + ix - 1] == -1
-                        or data[row + w + ix] == -1 or data[row - w + ix] == -1):
-                    frontier_cells.append((ix, iy))
-        if not frontier_cells:
+        g = np.asarray(grid.data, dtype=np.int16).reshape(h, w)
+        free    = (g >= 0) & (g < 25)
+        unknown = (g < 0)
+
+        # 상하좌우 중 하나라도 미탐사와 맞닿은 자유 셀 = 프론티어
+        nb = np.zeros_like(unknown)
+        nb[:, :-1] |= unknown[:, 1:]     # 오른쪽
+        nb[:, 1:]  |= unknown[:, :-1]    # 왼쪽
+        nb[:-1, :] |= unknown[1:, :]     # 위
+        nb[1:, :]  |= unknown[:-1, :]    # 아래
+        frontier = free & nb
+        if not frontier.any():
             return []
 
-        # 그리드 인접 군집화 (BFS)
-        cellset = set(frontier_cells)
-        clusters = []
-        while cellset:
-            seed = cellset.pop()
-            stack, comp = [seed], [seed]
-            while stack:
-                cx, cy = stack.pop()
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        n = (cx + dx, cy + dy)
-                        if n in cellset:
-                            cellset.remove(n)
-                            stack.append(n)
-                            comp.append(n)
-            if len(comp) >= self.frontier_min:
-                mx = sum(c[0] for c in comp) / len(comp)
-                my = sum(c[1] for c in comp) / len(comp)
-                clusters.append((ox + (mx + 0.5) * res,
-                                 oy + (my + 0.5) * res,
-                                 len(comp)))
-        return clusters
+        # 8방향 연결 성분으로 군집화
+        lbl, n = ndimage.label(frontier, structure=np.ones((3, 3), dtype=bool))
+        if n == 0:
+            return []
+        sizes = np.bincount(lbl.ravel())
+        idx = [i for i in range(1, n + 1) if sizes[i] >= self.frontier_min]
+        if not idx:
+            return []
+        cents = ndimage.center_of_mass(frontier, lbl, idx)   # (row, col) 순
+        return [(ox + (c[1] + 0.5) * res, oy + (c[0] + 0.5) * res, int(sizes[i]))
+                for c, i in zip(cents, idx)]
 
     def _pick_frontier(self, rx, ry):
         """가까우면서 충분히 큰 프론티어 선택 (이미 시도한 곳은 제외).

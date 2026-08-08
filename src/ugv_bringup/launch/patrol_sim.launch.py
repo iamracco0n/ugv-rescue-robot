@@ -26,16 +26,23 @@ def generate_launch_description():
     pkg_nav2_bringup = get_package_share_directory('nav2_bringup')
     pkg_slam_toolbox = get_package_share_directory('slam_toolbox')
 
+    # 월드 선택을 gazebo.launch.py 로 그대로 넘긴다
+    #   ros2 launch ugv_bringup patrol_sim.launch.py world:=rescue_building_large
+    world_arg = DeclareLaunchArgument(
+        'world', default_value='rescue_building',
+        description='worlds/ 아래 SDF 이름 (rescue_building | rescue_building_large)')
+
     # 1. Gazebo + Robot + 브리지 + RViz (열화상 브리지 포함)
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_bringup, 'launch', 'gazebo.launch.py')
-        )
+        ),
+        launch_arguments={'world': LaunchConfiguration('world')}.items()
     )
 
-    # 2. SLAM Toolbox (4초 후)
+    # 2. SLAM Toolbox (10초 후 — 로봇 스폰 8초 이후)
     slam_launch = TimerAction(
-        period=4.0,
+        period=10.0,
         actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -46,10 +53,10 @@ def generate_launch_description():
         ]
     )
 
-    # 3. Nav2 (8초 후) — fire_cloud 장애물 소스 포함된 nav2_params.yaml
+    # 3. Nav2 (14초 후) — fire_cloud 장애물 소스 포함된 nav2_params.yaml
     nav2_params_file = os.path.join(pkg_navigation, 'config', 'nav2_params.yaml')
     nav2_launch = TimerAction(
-        period=8.0,
+        period=14.0,
         actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -64,9 +71,9 @@ def generate_launch_description():
         ]
     )
 
-    # 4. 비전(YOLO 환자 감지 + 포탑 제어) (10초 후)
+    # 4. 비전(YOLO 환자 감지 + 포탑 제어) (16초 후)
     vision_launch = TimerAction(
-        period=10.0,
+        period=16.0,
         actions=[
             Node(package='ugv_vision', executable='yolo_pose_node',
                  name='yolo_pose_node',
@@ -77,9 +84,9 @@ def generate_launch_description():
         ]
     )
 
-    # 5. 화재 감지 + 순찰 (12초 후 — Nav2 활성화 후)
+    # 5. 화재 감지 + 순찰 (18초 후 — Nav2 활성화 후)
     patrol_launch = TimerAction(
-        period=12.0,
+        period=18.0,
         actions=[
             Node(package='ugv_vision', executable='fire_detection_node',
                  name='fire_detection_node',
@@ -95,6 +102,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         patrol_arg,
+        world_arg,
         gazebo_launch,
         slam_launch,
         nav2_launch,
