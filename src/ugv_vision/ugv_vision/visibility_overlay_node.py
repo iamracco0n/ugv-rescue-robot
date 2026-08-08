@@ -35,7 +35,10 @@ _N      = int(_SIZE / _RES)      # 200
 _ORIGIN = -_SIZE / 2.0           # -20.0 m
 
 # ── 카메라 파라미터 (D435i) ───────────────────────────────────────────────
-_FOV_RAD      = math.radians(87)  # D435i 실제 수평 FOV
+# 시뮬 카메라 수평 FOV (ugv.urdf.xacro: 1.089rad ≈ 62.4°).
+# 실기 D435i 는 87° 이지만, 시뮬에서 87° 를 쓰면 커버리지 부채꼴이 실제보다
+# 40% 넓게 그려져 못 본 구역을 봤다고 표시한다.
+_FOV_RAD      = 1.089
 _CAM_RANGE    = 8.0               # Gazebo far clip = D435i 최대 사거리 (m)
 _DEPTH_RAYS   = 48
 _IMG_W        = 640

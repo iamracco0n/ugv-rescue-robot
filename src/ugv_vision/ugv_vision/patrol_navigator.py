@@ -134,6 +134,9 @@ class PatrolNavigator(Node):
         self._frontier_t = 0.0                # 마지막 목표 선정 시각
         self._visited_frontiers: list[tuple] = []
         self._explore_done = False
+        self._sweeps = 0                      # 건물 전체를 훑은 횟수
+        self._victims: dict[int, tuple] = {}  # 확정 조난자 {pid: (x, y, label)}
+        self._fires_seen: list[tuple] = []    # 확정 화재 [(x, y)]
 
         # 조난자 확인(INSPECT) 상태
         self._inspect_pos = None              # 확인 중인 후보 (x,y)
@@ -163,6 +166,9 @@ class PatrolNavigator(Node):
         # 열원 확인 핸드셰이크 (fire_detection_node) — 조난자와 같은 흐름,
         # 다만 불에는 너무 가까이 붙지 않도록 standoff 를 따로 둔다
         self.create_subscription(PointStamped, '/fire_candidate',    self.fire_cand_cb, 10)
+        # 수색 결과 요약 보고용 — 확정된 조난자·화재 목록
+        self.create_subscription(MarkerArray,  '/patient_markers', self.victims_cb, 10)
+        self.create_subscription(PointStamped, '/fire_alert',      self.fire_seen_cb, 10)
         self.create_subscription(Bool,         '/fire_inspect_done', self.inspect_done_cb, 10)
 
         # ── 발행 ─────────────────────────────────────────────────────
@@ -172,6 +178,8 @@ class PatrolNavigator(Node):
         # 장애물 탈출용 — 로봇이 장애물 안에 들어가면 Nav2 는 시작 자세가
         # 무효라 경로를 못 낸다. 그때만 직접 후진 명령을 낸다.
         self.cmd_pub    = self.create_publisher(Twist, '/cmd_vel', 10)
+        # 한 바퀴 수색 완료 신호
+        self.sweep_pub  = self.create_publisher(Bool, '/sweep_complete', 10)
 
         self.create_timer(0.5, self.tick)     # 2 Hz FSM
         # 탈출 명령은 20Hz 로 낸다. Nav2 컨트롤러도 /cmd_vel 에 20Hz 로 0을
@@ -224,6 +232,11 @@ class PatrolNavigator(Node):
         approach = None
         if dist > standoff + self.approach_reach:
             approach = self._pull_back(tx, ty, rx, ry, standoff, self.goal_clearance)
+        elif dist < standoff - self.approach_reach:
+            # 너무 가까우면 물러선다. 화재는 costmap 에 장애물로 칠해지므로
+            # (obstacle_radius 1.3m) 그 안에 선 채로 두면 플래너가 막혀
+            # "박힘 → 탈출" 을 무한 반복한다(실측: 7분에 11회, 전부 화재 옆).
+            approach = self._retreat_point(tx, ty, rx, ry, standoff)
         if approach is None:
             # 이미 충분히 가깝거나 접근 가능한 자리가 없음 → 그 자리에서 스캔
             self._approach_goal = None
@@ -239,6 +252,22 @@ class PatrolNavigator(Node):
             self.get_logger().info(
                 f'{label} ({tx:.1f}, {ty:.1f}) {dist:.1f}m — '
                 f'({approach[0]:.1f}, {approach[1]:.1f}) 까지 접근 후 확인')
+
+    def victims_cb(self, msg: MarkerArray):
+        """target_manager 가 발행하는 환자 마커에서 확정 목록을 뽑는다."""
+        for m in msg.markers:
+            if m.ns != 'patient_text' or m.action != Marker.ADD:
+                continue
+            pid = m.id // 3
+            self._victims[pid] = (m.pose.position.x, m.pose.position.y,
+                                  m.text.split('\n')[0] if m.text else '')
+
+    def fire_seen_cb(self, msg: PointStamped):
+        fx, fy = msg.point.x, msg.point.y
+        for (x, y) in self._fires_seen:
+            if math.hypot(x - fx, y - fy) < 2.0:
+                return
+        self._fires_seen.append((fx, fy))
 
     def fire_cand_cb(self, msg: PointStamped):
         """열원 후보 — 조난자와 같은 정지·조준 확인. 다만 더 멀찍이 선다."""
@@ -372,6 +401,44 @@ class PatrolNavigator(Node):
         while back < d:
             px, py = tx - ux * back, ty - uy * back
             if self._is_free(px, py, clearance):
+                return (px, py)
+            back += 0.25
+        return None
+
+    def _report_mission(self, sweep_n: int):
+        """건물을 한 바퀴 다 훑을 때마다 수색 결과를 요약 보고한다.
+
+        기존에는 미탐사 경계가 없어져도 아무 말 없이 재순찰만 반복해서,
+        운용자가 '수색이 끝났는지' 를 알 수 없었다. 구조 임무에서는 이게
+        가장 중요한 정보다. 순찰 자체는 감시를 위해 계속 돈다.
+        """
+        vics = sorted(self._victims.items())
+        fires = list(self._fires_seen)
+        lines = [f'━━ 수색 {sweep_n}회차 완료 — 미탐사 구역 없음 ━━',
+                 f'  조난자 {len(vics)}명, 화재 {len(fires)}건']
+        for pid, (x, y, lbl) in vics:
+            lines.append(f'   · #{pid} {lbl} ({x:.1f}, {y:.1f})')
+        for i, (x, y) in enumerate(fires):
+            lines.append(f'   · 🔥 화재{i} ({x:.1f}, {y:.1f})')
+        lines.append('  순찰은 감시를 위해 계속합니다.')
+        self.get_logger().info('\n'.join(lines))
+        m = Bool(); m.data = True
+        self.sweep_pub.publish(m)
+
+    def _retreat_point(self, tx, ty, rx, ry, standoff):
+        """대상에서 standoff 만큼 떨어진 자리로 물러설 지점.
+
+        로봇이 이미 대상보다 가까이 있을 때 쓴다. 대상→로봇 방향으로
+        standoff 지점을 잡고, 막혀 있으면 조금씩 더 물러나며 자유공간을 찾는다.
+        """
+        d = math.hypot(rx - tx, ry - ty)
+        if d < 1e-3:
+            return None
+        ux, uy = (rx - tx) / d, (ry - ty) / d
+        back = standoff
+        while back <= standoff + 2.0:
+            px, py = tx + ux * back, ty + uy * back
+            if self._is_free(px, py, self.goal_clearance):
                 return (px, py)
             back += 0.25
         return None
@@ -633,8 +700,8 @@ class PatrolNavigator(Node):
         if nxt is None:
             if not self._explore_done:
                 self._explore_done = True
-                self.get_logger().info(
-                    '미탐사 경계 없음 — 탐사 완료. 재순찰을 위해 방문 기록 초기화')
+                self._sweeps += 1
+                self._report_mission(self._sweeps)
             # 다 훑었으면 방문 기록을 비워 재순찰(계속 감시)
             self._visited_frontiers.clear()
             self._frontier_goal = None
