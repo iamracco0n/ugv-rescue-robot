@@ -52,6 +52,7 @@ INSPECT_SAMPLES     = 5                   # 정지·조준 상태에서 모을 �
 # 유령 후보로 보고 곧바로 포기해 순찰 시간을 낭비하지 않는다.
 INSPECT_TIMEOUT_S   = 28.0                # 전체 한도 (대상까지 접근 + 정지 + 포탑 슬루)
 INSPECT_AFTER_AIM_S = 2.5                 # 조준 완료 후 대상이 안 보일 때 포기까지
+MAX_SAMPLE_SPREAD   = 0.30                # 표본이 이보다 흩어지면 등록 보류 (m)
 
 # 블라인드코너 스캔 파라미터
 SCAN_DWELL_S     = 1.2           # 각 스캔 포인트 체류 시간 (s)
@@ -416,6 +417,12 @@ class TargetManager(Node):
         gx, gy = xs[mid], ys[mid]
         spread = max(math.hypot(x - gx, y - gy)
                      for x, y in self._inspect_samples)
+        # 정지·조준 상태의 표본이 흩어져 있으면 관측 자체가 불안정한 것이다.
+        # 실측: 실재하지 않는 조난자가 산포 0.58m 로 등록됐다(정상은 0.00~0.05m).
+        if spread > MAX_SAMPLE_SPREAD:
+            self.get_logger().info(
+                f'표본 산포 {spread:.2f}m > {MAX_SAMPLE_SPREAD}m — 관측 불안정으로 등록 보류')
+            return
         self._try_register(gx, gy, spread)
 
     def _try_register(self, gx=None, gy=None, spread=None):
