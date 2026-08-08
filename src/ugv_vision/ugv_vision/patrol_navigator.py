@@ -87,6 +87,11 @@ class PatrolNavigator(Node):
         self.declare_parameter('escape_speed',    0.35)     # 후진 속도(m/s)
         self.declare_parameter('escape_max_s',    5.0)      # 후진 최대 시간(s)
         self.declare_parameter('escape_min_move', 0.8)      # 이만큼 물러나면 탈출 성공(m)
+        # 탈출은 '장애물에 박혔을 때' 를 위한 것이지, Nav2 자체가 죽었을 때
+        # 계속 후진하라는 뜻이 아니다. 실제로 Nav2 lifecycle 기동이 실패한
+        # 실행에서 탈출이 30회 연속 발동해 로봇을 복도 23m 뒤로 밀어냈다.
+        self.declare_parameter('escape_cooldown_s',  25.0)  # 탈출 간 최소 간격
+        self.declare_parameter('escape_max_streak',  3)     # 연속 이 횟수 넘으면 중단
         # 조난자에 얼마나 가까이 가서 스캔할지
         self.declare_parameter('inspect_standoff', 1.5)     # 조난자에서 유지할 거리(m)
         self.declare_parameter('fire_standoff',    2.5)     # 열원에서 유지할 거리(m)
@@ -129,6 +134,8 @@ class PatrolNavigator(Node):
         self.escape_speed      = float(self.get_parameter('escape_speed').value)
         self.escape_max_s      = float(self.get_parameter('escape_max_s').value)
         self.escape_min_move   = float(self.get_parameter('escape_min_move').value)
+        self.escape_cooldown   = float(self.get_parameter('escape_cooldown_s').value)
+        self.escape_max_streak = int(self.get_parameter('escape_max_streak').value)
         self.cam_range         = float(self.get_parameter('cam_see_range').value)
         self.cam_fov           = float(self.get_parameter('cam_fov_rad').value)
         self.visual_min        = int(self.get_parameter('visual_min_size').value)
@@ -173,6 +180,9 @@ class PatrolNavigator(Node):
         self._stuck_ref = None                # (x, y, t) 마지막으로 움직인 기준점
         self._escape_start = None
         self._escape_from = (0.0, 0.0)
+        self._escape_last_t = -1e9            # 마지막 탈출 시각
+        self._escape_streak = 0               # 연속 탈출 횟수
+        self._nav_down_warned = False
 
         # ── TF ───────────────────────────────────────────────────────
         self._tf_buf = tf2_ros.Buffer(cache_time=Duration(seconds=10))
@@ -706,12 +716,29 @@ class PatrolNavigator(Node):
         # 일부러 정지해 있는 상태라 제외한다.
         if self.state == PATROL:
             if self._update_stuck(rx, ry, self._now()):
-                self.get_logger().warn(
-                    f'{self.stuck_confirm_s:.0f}초간 못 움직임 ({rx:.1f}, {ry:.1f}) '
-                    '— 장애물 박힘으로 보고 후진 탈출')
-                self._escape_start = self._now()
-                self._escape_from = (rx, ry)
-                self.state = ESCAPE
+                now = self._now()
+                if self._escape_streak >= self.escape_max_streak:
+                    # 연달아 탈출해도 순찰이 진행되지 않으면 장애물 문제가
+                    # 아니라 내비게이션 자체가 죽은 것이다. 계속 후진시키면
+                    # 로봇만 엉뚱한 데로 밀려나고 진짜 원인이 가려진다.
+                    if not self._nav_down_warned:
+                        self._nav_down_warned = True
+                        self.get_logger().error(
+                            f'탈출 {self._escape_streak}회 연속인데 순찰이 진행되지 않음 — '
+                            'Nav2 가 죽었거나 목표를 못 받는 상태로 보임. '
+                            '탈출을 중단하고 대기한다(로그 확인 필요).')
+                    self._stuck_ref = None
+                elif now - self._escape_last_t < self.escape_cooldown:
+                    self._stuck_ref = None     # 쿨다운 중 — 다음 기회에
+                else:
+                    self.get_logger().warn(
+                        f'{self.stuck_confirm_s:.0f}초간 못 움직임 ({rx:.1f}, {ry:.1f}) '
+                        '— 장애물 박힘으로 보고 후진 탈출')
+                    self._escape_start = now
+                    self._escape_last_t = now
+                    self._escape_streak += 1
+                    self._escape_from = (rx, ry)
+                    self.state = ESCAPE
                 # Nav2 를 먼저 멈춘다. 안 그러면 컨트롤러가 20Hz 로 /cmd_vel 에
                 # 계속 명령을 내보내 후진 명령과 경합해 로봇이 거의 안 움직인다.
                 self._stop_here()
@@ -810,6 +837,12 @@ class PatrolNavigator(Node):
                     or now - self._frontier_t > self.frontier_replan)
         if not need_new:
             return
+
+        if goal is not None and reached:
+            # 실제로 목표에 도달했다 = 내비게이션이 살아 있다는 증거.
+            # 탈출 연속 카운터를 여기서만 푼다(타임아웃은 진행으로 안 친다).
+            self._escape_streak = 0
+            self._nav_down_warned = False
 
         if goal is not None and (reached or timedout):
             # 방문 기록은 '프론티어 중심' 으로 남긴다 (_pick_frontier 의 중복

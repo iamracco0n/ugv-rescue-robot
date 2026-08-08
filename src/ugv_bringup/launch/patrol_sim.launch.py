@@ -40,9 +40,9 @@ def generate_launch_description():
         launch_arguments={'world': LaunchConfiguration('world')}.items()
     )
 
-    # 2. SLAM Toolbox (10초 후 — 로봇 스폰 8초 이후)
+    # 2. SLAM Toolbox (14초 후 — 로봇 스폰 8초 이후)
     slam_launch = TimerAction(
-        period=10.0,
+        period=14.0,
         actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -53,10 +53,10 @@ def generate_launch_description():
         ]
     )
 
-    # 3. Nav2 (14초 후) — fire_cloud 장애물 소스 포함된 nav2_params.yaml
+    # 3. Nav2 (22초 후 — 무거운 월드에서 lifecycle 타임아웃 방지) — fire_cloud 장애물 소스 포함된 nav2_params.yaml
     nav2_params_file = os.path.join(pkg_navigation, 'config', 'nav2_params.yaml')
     nav2_launch = TimerAction(
-        period=14.0,
+        period=22.0,
         actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -71,9 +71,9 @@ def generate_launch_description():
         ]
     )
 
-    # 4. 비전(YOLO 환자 감지 + 포탑 제어) (16초 후)
+    # 4. 비전(YOLO 환자 감지 + 포탑 제어) (26초 후)
     vision_launch = TimerAction(
-        period=16.0,
+        period=26.0,
         actions=[
             Node(package='ugv_vision', executable='yolo_pose_node',
                  name='yolo_pose_node',
@@ -84,9 +84,9 @@ def generate_launch_description():
         ]
     )
 
-    # 5. 화재 감지 + 순찰 (18초 후 — Nav2 활성화 후)
+    # 5. 화재 감지 + 순찰 (30초 후 — Nav2 활성화 후)
     patrol_launch = TimerAction(
-        period=18.0,
+        period=30.0,
         actions=[
             Node(package='ugv_vision', executable='fire_detection_node',
                  name='fire_detection_node',
