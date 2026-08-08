@@ -107,7 +107,21 @@ class PatrolNavigator(Node):
         # 관리해서, 라이다 프론티어가 없어도 안 본 구역으로 계속 들어간다.
         self.declare_parameter('cam_see_range', 4.5)        # 유효 관측 거리(m)
         self.declare_parameter('cam_fov_rad',   1.089)      # 카메라 수평 FOV
-        self.declare_parameter('visual_min_size', 25)       # 미관측 군집 최소 셀 수
+        # 미관측 군집 최소 크기. 카메라 FOV 스윕은 사방에 자잘한 미관측
+        # 조각을 항상 남긴다. 작게 잡으면 '주변 미관측' 이 영영 비지 않아
+        # 로봇이 제자리에서 조각만 갈아댄다(실측: 목표 35개 중 27개가 주변
+        # 미관측, 이동 범위가 56m 건물의 가운데 15m 뿐이었다).
+        self.declare_parameter('visual_min_size', 300)      # 셀 수(0.75m^2)
+        # 이 반경 안에 안 본 구역이 있으면, 멀리 있는 미탐사 경계보다 먼저 훑는다
+        self.declare_parameter('sweep_first_radius', 5.0)
+        # 다만 연속으로 이만큼 주변만 훑으면, 한 번은 미탐사 경계로 나가서
+        # 수색 범위를 넓힌다. 방 하나에 갇히는 것을 막는다.
+        self.declare_parameter('sweep_first_max_streak', 3)
+        # 사각지대(벽 모서리·장애물 뒤)는 여유가 안 나오므로 낮게 잡는다
+        self.declare_parameter('visual_clearance', 0.45)
+        # 목표 도착 후 그 자리에서 포탑이 훑을 시간(초). 바로 다음 목표로
+        # 떠나면 방에 들어갔다 사각지대를 못 보고 나온다.
+        self.declare_parameter('arrive_dwell_s', 4.0)
 
         xs = list(self.get_parameter('waypoints_x').value)
         ys = list(self.get_parameter('waypoints_y').value)
@@ -139,6 +153,10 @@ class PatrolNavigator(Node):
         self.cam_range         = float(self.get_parameter('cam_see_range').value)
         self.cam_fov           = float(self.get_parameter('cam_fov_rad').value)
         self.visual_min        = int(self.get_parameter('visual_min_size').value)
+        self.sweep_first_r     = float(self.get_parameter('sweep_first_radius').value)
+        self.sweep_max_streak  = int(self.get_parameter('sweep_first_max_streak').value)
+        self.visual_clearance  = float(self.get_parameter('visual_clearance').value)
+        self.dwell_s           = float(self.get_parameter('arrive_dwell_s').value)
 
         # ── 상태 ─────────────────────────────────────────────────────
         self.state = IDLE
@@ -158,6 +176,8 @@ class PatrolNavigator(Node):
         self._frontier_goal = None            # 현재 향하는 goal (벽에서 당긴 점)
         self._frontier_src = None             # 그 goal 을 만든 프론티어 중심 (중복 판정용)
         self._frontier_t = 0.0                # 마지막 목표 선정 시각
+        self._dwell_until = None              # 도착 후 훑기 종료 시각
+        self._local_streak = 0                # 연속 '주변 미관측' 목표 수
         self._visited_frontiers: list[tuple] = []
         self._explore_done = False
         self._sweeps = 0                      # 건물 전체를 훑은 횟수
@@ -623,14 +643,25 @@ class PatrolNavigator(Node):
         미탐사 셀에 놓여 Nav2 가 도달 실패 → 복구 → 벽으로 밀고 드는 일이
         반복된다. 로봇 쪽으로 당겨 자유공간에 놓은 점을 goal 로 쓴다.
         """
-        cands = self._find_frontiers()
-        kind = '미탐사 경계'
-        if not cands:
-            # 라이다로는 다 그렸지만 카메라로 안 본 구역이 남아 있으면 거기로.
-            # 라이다는 문틈으로 방 안을 그려버리므로, 이게 없으면 방을 들여다
-            # 보지도 않고 "수색 완료" 로 넘어간다.
-            cands = self._find_visual_frontiers()
-            kind = '미관측 구역'
+        # 지금 있는 방부터 다 훑고 나간다.
+        # 미관측 구역을 '라이다 프론티어가 전부 없어진 뒤' 로 미루면, 방이
+        # 여러 개인 건물에서는 라이다 프론티어가 계속 남아 있어서 로봇이
+        # 들어간 방의 사각지대를 안 보고 다음 방으로 떠나버린다.
+        # → 반경 sweep_first_r 안에 안 본 구역이 있으면 그것부터 처리한다.
+        visual = self._find_visual_frontiers()
+        near = [c for c in visual
+                if math.hypot(c[0] - rx, c[1] - ry) <= self.sweep_first_r]
+        # 연속으로 주변만 훑으면 한 번은 밖으로 나간다. 안 그러면 방 하나에
+        # 갇혀 수색 범위가 안 넓어진다.
+        if near and self._local_streak < self.sweep_max_streak:
+            cands, kind = near, '주변 미관측(우선)'
+            self._local_streak += 1
+        else:
+            self._local_streak = 0
+            cands = self._find_frontiers()
+            kind = '미탐사 경계'
+            if not cands:
+                cands, kind = visual, '미관측 구역'
         self._last_goal_kind = kind
 
         best, best_score = None, -1e9
@@ -643,8 +674,12 @@ class PatrolNavigator(Node):
             d = math.hypot(fx - rx, fy - ry)
             if d < 0.8:            # 코앞은 의미 없음
                 continue
-            goal = self._pull_back(fx, fy, rx, ry,
-                                   self.frontier_standoff, self.goal_clearance)
+            # 사각지대는 벽 모서리·장애물 뒤라 사방 0.7m 여유 조건에 걸려
+            # 후보에서 통째로 빠졌다. 미관측 목표는 여유를 낮춰 접근을 허용한다.
+            # (그래도 Nav2 inflation 때문에 못 가면 타임아웃으로 걸러진다)
+            clr = (self.visual_clearance if kind != '미탐사 경계'
+                   else self.goal_clearance)
+            goal = self._pull_back(fx, fy, rx, ry, self.frontier_standoff, clr)
             if goal is None:
                 continue           # 접근 가능한 자유공간을 못 찾음 → 건너뜀
             # 당긴 결과가 로봇 코앞이면 도착 판정이 즉시 서서 제자리걸음이 된다
@@ -843,6 +878,18 @@ class PatrolNavigator(Node):
             # 탈출 연속 카운터를 여기서만 푼다(타임아웃은 진행으로 안 친다).
             self._escape_streak = 0
             self._nav_down_warned = False
+            # 도착만 하고 바로 다음 목표로 뜨면 사각지대를 못 본다.
+            # 그 자리에서 포탑이 한 바퀴 훑을 시간을 준다.
+            if self._dwell_until is None:
+                self._dwell_until = now + self.dwell_s
+                self._stop_here()
+                return
+
+        # 도착 후 훑는 중 — 포탑 스캔이 돌도록 그대로 둔다
+        if self._dwell_until is not None:
+            if now < self._dwell_until:
+                return
+            self._dwell_until = None
 
         if goal is not None and (reached or timedout):
             # 방문 기록은 '프론티어 중심' 으로 남긴다 (_pick_frontier 의 중복

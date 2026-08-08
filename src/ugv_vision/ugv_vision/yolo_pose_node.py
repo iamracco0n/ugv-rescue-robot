@@ -78,7 +78,14 @@ class YoloPoseNode(Node):
         self.declare_parameter('det_conf',        0.50)  # YOLO 박스 신뢰도 하한
         self.declare_parameter('min_kpt_conf',    0.50)  # 키포인트 신뢰도 하한
         self.declare_parameter('min_valid_kpts',  6)     # 위 기준 통과 키포인트 최소 개수
-        self.declare_parameter('depth_tol',       0.60)  # depth vs 박스크기 추정 허용 상대오차
+        # depth vs 박스크기 추정 허용 상대오차.
+        # 박스 대각선 추정은 '서 있는 사람(1.75m)' 을 가정한다. 앉은 사람,
+        # 침대에 누운 사람, 잔해에 가린 사람은 박스가 작아 추정 거리가 크게
+        # 어긋나므로 0.6 으로 잡으면 진짜 조난자가 대량 기각된다.
+        # (실측: 15초당 depth불일치 기각 42건, 같은 구간 키포인트 기각은 3건)
+        # 이 검사는 '벽을 사람으로 보는' 극단적 경우만 걸러내면 충분하다.
+        # 사람 여부의 실질적 판별은 키포인트 신뢰도가 담당한다.
+        self.declare_parameter('depth_tol',       2.00)
         self.declare_parameter('min_box_diag_px', 40.0)  # 너무 작은 박스 제거
         self.declare_parameter('max_box_diag_px', 900.0) # 화면 전체를 덮는 박스 제거
         self.det_conf        = float(self.get_parameter('det_conf').value)
@@ -301,6 +308,13 @@ class YoloPoseNode(Node):
         # 가까우므로 0.65 로 여유를 둔다.
         if shin > 0 and ll > 0:
             if shin / ll > 1.5 and ll / tl < 0.65 and torso_from_vertical < 35.0:
+                return 'sitting'
+        elif ll > 0 and torso_from_vertical < 35.0:
+            # 발목이 안 잡히는 경우(정강이 0px)가 흔하다. 휠체어는 다리가
+            # 프레임 아래로 잘리거나 바퀴에 가려 발목 키포인트가 자주 빠진다.
+            # 이때는 허벅지/몸통 비율만으로 판단한다.
+            # 실측: 서있음 0.72~0.74 / 앉음 0.42~0.56 → 0.62 로 가른다.
+            if ll / tl < 0.62:
                 return 'sitting'
         return 'standing'
 
