@@ -275,9 +275,33 @@ class YoloPoseNode(Node):
             return None
         cosang = (tx * lx + ty * ly) / (tl * ll)
         bend = math.degrees(math.acos(max(-1.0, min(1.0, cosang))))
-        # 서 있으면 몸통과 허벅지가 거의 일직선(0도 근처), 앉으면 90도로 꺾인다
+
+        # 정강이 길이 — 정면 뷰에서 앉음을 가리는 핵심 단서
+        shin = 0.0
+        if kn is not None and an is not None:
+            shin = math.hypot(an[0] - kn[0], an[1] - kn[1])
+
+        self.get_logger().info(
+            f'[자세] 몸통기울기 {torso_from_vertical:.0f}° 몸통-허벅지 {bend:.0f}° '
+            f'몸통 {tl:.0f}px 허벅지 {ll:.0f}px 정강이 {shin:.0f}px '
+            f'허벅지/몸통 {ll/tl:.2f} 정강이/허벅지 {shin/max(ll,1e-6):.2f}',
+            throttle_duration_sec=3.0)
+
+        # 옆에서 보면 몸통과 허벅지가 크게 꺾인다
         if bend > 45.0:
             return 'sitting'
+        # 정면에서는 허벅지가 카메라 쪽으로 향해 원근 단축된다. 2D 각도는
+        # 거의 안 벌어지지만, 허벅지가 정강이·몸통보다 뚜렷하게 짧아진다.
+        #
+        # 같은 자리·같은 거리에서 두 자세를 실측한 값 (시뮬):
+        #            몸통-허벅지   허벅지/몸통   정강이/허벅지
+        #   서있음        3°       0.72~0.74     0.98~1.00
+        #   앉음      45~62°       0.42~0.56     1.96~2.60
+        # 정강이/허벅지가 가장 확실히 갈리고, 허벅지/몸통은 서있음(0.74)과
+        # 가까우므로 0.65 로 여유를 둔다.
+        if shin > 0 and ll > 0:
+            if shin / ll > 1.5 and ll / tl < 0.65 and torso_from_vertical < 35.0:
+                return 'sitting'
         return 'standing'
 
     def classify(self, kpts, kconf=None):
