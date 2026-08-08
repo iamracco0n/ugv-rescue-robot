@@ -42,7 +42,7 @@ from sensor_msgs_py import point_cloud2
 from nav_msgs.msg import OccupancyGrid, Odometry
 from geometry_msgs.msg import PointStamped
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import Header
+from std_msgs.msg import Bool, Header
 
 import tf2_ros
 
@@ -94,6 +94,16 @@ class FireDetectionNode(Node):
         # 1.2m 로는 화재 하나가 3~4건으로 중복 등록됐다.
         self.declare_parameter('merge_dist', 2.0)               # m, 이 안이면 같은 화재
         self.declare_parameter('confirm_hits', 2)               # 몇 번 봐야 확정
+        # ── 정지 조준 확인 ────────────────────────────────────────────
+        # 이동·포탑 스윕 중에 등록하면 각도 스냅샷과 실제 렌더 시각이 어긋나
+        # 위치가 크게 튄다(실측: 실제 화재 2곳인데 5m 이상 벗어난 항목 2건 발생).
+        # 조난자와 같은 방식으로, 멈춰서 겨눈 상태에서만 등록한다.
+        self.declare_parameter('inspect_enabled',   True)
+        self.declare_parameter('inspect_samples',   5)
+        self.declare_parameter('inspect_settle_spd', 0.05)      # 정지 판정(m/s)
+        self.declare_parameter('inspect_yaw_tol',   0.07)       # 조준 완료 판정(rad, ≈4°)
+        self.declare_parameter('inspect_timeout_s', 28.0)
+        self.declare_parameter('inspect_after_aim_s', 2.5)      # 겨눴는데 안 보이면 포기
 
         g = self.get_parameter
         self.thermal_topic = g('thermal_topic').value
@@ -113,6 +123,12 @@ class FireDetectionNode(Node):
         self.obst_r        = g('obstacle_radius').value
         self.merge_d       = g('merge_dist').value
         self.confirm_hits  = int(g('confirm_hits').value)
+        self.insp_enabled   = bool(g('inspect_enabled').value)
+        self.insp_samples   = int(g('inspect_samples').value)
+        self.insp_settle    = float(g('inspect_settle_spd').value)
+        self.insp_yaw_tol   = float(g('inspect_yaw_tol').value)
+        self.insp_timeout   = float(g('inspect_timeout_s').value)
+        self.insp_after_aim = float(g('inspect_after_aim_s').value)
 
         # 원본 픽셀 임계값 (16bit: K/lin_res)
         self.raw_thresh = self.temp_thresh_k / self.lin_res
@@ -126,6 +142,16 @@ class FireDetectionNode(Node):
         self.robot_y = 0.0
         self.robot_theta = 0.0
         self.turret_yaw = 0.0
+        self.robot_speed = 0.0
+
+        # 정지 조준 확인(INSPECT) 상태
+        self._ci_active   = False                 # 확인 진행 중
+        self._ci_aim      = None                  # 조준 목표 (map x,y)
+        self._ci_peak     = 0.0
+        self._ci_start    = 0.0
+        self._ci_settled  = None                  # 정지+조준이 붙은 시각
+        self._ci_samples  = []
+        self._ci_seen_t   = 0.0                   # 마지막으로 열원이 보인 시각
         # 화재 소스: {'x','y','peak_k','hits','confirmed'}
         self.fires: list[dict] = []
         # 누적 열장 (0..100, 0=미검출)
@@ -150,10 +176,14 @@ class FireDetectionNode(Node):
         self.pub_cloud  = self.create_publisher(PointCloud2,   '/fire_cloud',   10)
         self.pub_marker = self.create_publisher(MarkerArray,   '/fire_markers', 10)
         self.pub_alert  = self.create_publisher(PointStamped,  '/fire_alert',   10)
+        # 정지 조준 확인 핸드셰이크 — patrol_navigator 가 소비
+        self.pub_ci_req  = self.create_publisher(PointStamped, '/fire_candidate',    10)
+        self.pub_ci_done = self.create_publisher(Bool,         '/fire_inspect_done', 10)
         # 불 박스 오버레이 이미지 → rqt_image_view / RViz Image
         self.pub_img    = self.create_publisher(Image,         '/fire/image_annotated', 5)
 
         self.create_timer(0.5, self.publish_all)   # 2 Hz
+        self.create_timer(0.5, self._ci_timer)     # 조준 확인 타임아웃 감시
 
         self.get_logger().info(
             f'fire_detection_node 시작 — thermal={self.thermal_topic}, '
@@ -194,6 +224,8 @@ class FireDetectionNode(Node):
         self.robot_x = msg.pose.pose.position.x
         self.robot_y = msg.pose.pose.position.y
         self.robot_theta = _yaw_from_quat(msg.pose.pose.orientation)
+        v = msg.twist.twist
+        self.robot_speed = math.hypot(v.linear.x, v.linear.y) + abs(v.angular.z) * 0.2
 
     def joint_cb(self, msg):
         for name, pos in zip(msg.name, msg.position):
@@ -295,7 +327,7 @@ class FireDetectionNode(Node):
                     throttle_duration_sec=5.0)
                 continue
 
-            self._register_fire(fx, fy, peak_k)
+            self._observe_fire(fx, fy, peak_k, now_s)
 
     def slam_map_cb(self, msg: OccupancyGrid):
         self._slam_map = msg
@@ -397,6 +429,98 @@ class FireDetectionNode(Node):
         near = patch[(patch > 0.05) & np.isfinite(patch)
                      & (np.abs(patch - center) < 0.5)]
         return float(np.median(near)) if near.size else center
+
+    # ── 정지 조준 확인(INSPECT) ────────────────────────────────────────
+
+    def _aim_yaw_error(self):
+        """조준 목표와 현재 포탑 각도의 차이(rad)."""
+        if self._ci_aim is None:
+            return math.inf
+        rx, ry, rtheta = self._robot_pose()
+        aim = math.atan2(self._ci_aim[1] - ry, self._ci_aim[0] - rx)
+        err = (aim - rtheta) - self.turret_yaw
+        while err >  math.pi: err -= 2 * math.pi
+        while err < -math.pi: err += 2 * math.pi
+        return err
+
+    def _observe_fire(self, fx, fy, peak_k, now_s):
+        """열원 관측 → 정지·조준 후에만 등록.
+
+        이동·포탑 스윕 중에 등록하면 위치가 크게 튄다. 조난자와 동일하게
+        후보를 보면 정지를 요청하고, 멈춰서 겨눈 상태에서 모은 표본의
+        중앙값으로 등록한다.
+        """
+        if not self.insp_enabled:
+            self._register_fire(fx, fy, peak_k)
+            return
+
+        # 이미 확정된 화재 근처면 재확인 불필요 — 기존 병합 경로로
+        for f in self.fires:
+            if f['confirmed'] and math.hypot(f['x'] - fx, f['y'] - fy) < self.merge_d:
+                self._register_fire(fx, fy, peak_k)
+                return
+
+        self._ci_seen_t = now_s
+
+        if not self._ci_active:
+            self._ci_active  = True
+            self._ci_aim     = (fx, fy)
+            self._ci_peak    = peak_k
+            self._ci_start   = now_s
+            self._ci_settled = None
+            self._ci_samples = []
+            p = PointStamped()
+            p.header.frame_id = 'map'
+            p.header.stamp = self.get_clock().now().to_msg()
+            p.point.x, p.point.y, p.point.z = float(fx), float(fy), 0.5
+            self.pub_ci_req.publish(p)
+            self.get_logger().info(
+                f'열원 후보 ({fx:.1f},{fy:.1f}) — 정지 요청 후 조준 확인 시작')
+            return
+
+        # 정지 + 조준이 붙었는지
+        settled = (self.robot_speed <= self.insp_settle
+                   and abs(self._aim_yaw_error()) <= self.insp_yaw_tol)
+        if settled and self._ci_settled is None:
+            self._ci_settled = now_s
+        if not settled:
+            return
+
+        self._ci_samples.append((fx, fy))
+        self._ci_aim  = (fx, fy)
+        self._ci_peak = max(self._ci_peak, peak_k)
+
+        if len(self._ci_samples) >= self.insp_samples:
+            xs = sorted(s[0] for s in self._ci_samples)
+            ys = sorted(s[1] for s in self._ci_samples)
+            m = len(xs) // 2
+            gx, gy = xs[m], ys[m]
+            spread = max(math.hypot(x - gx, y - gy) for x, y in self._ci_samples)
+            self.get_logger().info(
+                f'열원 확인 완료 ({gx:.1f},{gy:.1f}) 표본{len(xs)}개 산포{spread:.2f}m')
+            self._register_fire(gx, gy, self._ci_peak)
+            self._finish_ci(True)
+
+    def _ci_timer(self):
+        """확인 상태 타임아웃 감시 (열원이 시야에서 사라져도 풀려야 한다)."""
+        if not self._ci_active:
+            return
+        now_s = self.get_clock().now().nanoseconds * 1e-9
+        lost = now_s - self._ci_seen_t
+        if now_s - self._ci_start > self.insp_timeout:
+            self.get_logger().warn('열원 조준 확인 시간초과 — 순찰 재개')
+            self._finish_ci(False)
+        elif self._ci_settled is not None and lost > self.insp_after_aim:
+            self.get_logger().info('겨눴는데 열원 없음 — 유령 후보로 판단, 순찰 재개')
+            self._finish_ci(False)
+
+    def _finish_ci(self, ok: bool):
+        self._ci_active  = False
+        self._ci_aim     = None
+        self._ci_settled = None
+        self._ci_samples = []
+        m = Bool(); m.data = bool(ok)
+        self.pub_ci_done.publish(m)
 
     def _register_fire(self, fx, fy, peak_k):
         # 기존 화재와 병합

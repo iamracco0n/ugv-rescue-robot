@@ -84,7 +84,8 @@ class PatrolNavigator(Node):
         self.declare_parameter('escape_max_s',    5.0)      # 후진 최대 시간(s)
         self.declare_parameter('escape_min_move', 0.8)      # 이만큼 물러나면 탈출 성공(m)
         # 조난자에 얼마나 가까이 가서 스캔할지
-        self.declare_parameter('inspect_standoff', 1.5)     # 대상에서 유지할 거리(m)
+        self.declare_parameter('inspect_standoff', 1.5)     # 조난자에서 유지할 거리(m)
+        self.declare_parameter('fire_standoff',    2.5)     # 열원에서 유지할 거리(m)
         self.declare_parameter('approach_reach',   0.45)    # 접근 지점 도달 판정(m)
         self.declare_parameter('frontier_reach',   0.8)     # 프론티어 goal 도달 판정(m)
 
@@ -103,6 +104,7 @@ class PatrolNavigator(Node):
         self.frontier_standoff = float(self.get_parameter('frontier_standoff').value)
         self.goal_clearance    = float(self.get_parameter('goal_clearance').value)
         self.inspect_standoff  = float(self.get_parameter('inspect_standoff').value)
+        self.fire_standoff     = float(self.get_parameter('fire_standoff').value)
         self.approach_reach    = float(self.get_parameter('approach_reach').value)
         self.frontier_reach    = float(self.get_parameter('frontier_reach').value)
         self.explore_timeout   = float(self.get_parameter('explore_goal_timeout').value)
@@ -158,6 +160,10 @@ class PatrolNavigator(Node):
         # 조난자 확인 핸드셰이크 (target_manager_node)
         self.create_subscription(PointStamped, '/inspect_request', self.inspect_req_cb,  10)
         self.create_subscription(Bool,         '/inspect_done',    self.inspect_done_cb, 10)
+        # 열원 확인 핸드셰이크 (fire_detection_node) — 조난자와 같은 흐름,
+        # 다만 불에는 너무 가까이 붙지 않도록 standoff 를 따로 둔다
+        self.create_subscription(PointStamped, '/fire_candidate',    self.fire_cand_cb, 10)
+        self.create_subscription(Bool,         '/fire_inspect_done', self.inspect_done_cb, 10)
 
         # ── 발행 ─────────────────────────────────────────────────────
         self.goal_pub   = self.create_publisher(PoseStamped, '/goal_pose',      10)
@@ -194,15 +200,19 @@ class PatrolNavigator(Node):
             self.get_logger().info('SLAM 맵 수신 — 순찰 준비 완료')
 
     def inspect_req_cb(self, msg: PointStamped):
-        """조난자 후보 발견 → 가까이 접근한 뒤 정지·조준해서 확인.
+        """조난자 후보 발견 → 가까이 접근한 뒤 정지·조준해서 확인."""
+        self._inspect_req(msg.point.x, msg.point.y,
+                          self.inspect_standoff, '👤 조난자 후보')
+
+    def _inspect_req(self, tx, ty, standoff, label):
+        """대상 앞 standoff 지점까지 접근한 뒤 멈춰서 확인.
 
         멀리서 재면 각도 오차 1°가 거리에 비례해 위치 오차로 커지고, depth 도
-        먼 거리에서 부정확하다. 대상 앞 inspect_standoff 지점까지 접근한 뒤
-        멈춰서 스캔한다.
+        먼 거리에서 부정확하다. 조난자·열원 모두 같은 흐름을 쓰되 서 있는
+        거리만 다르다(불에는 더 멀찍이).
         """
-        if self.state in (INSPECT, FIRE_ALARM):
+        if self.state in (INSPECT, FIRE_ALARM, ESCAPE):
             return
-        tx, ty = msg.point.x, msg.point.y
         rx, ry = self._robot_pose()
         self._inspect_pos = (tx, ty)
         self._inspect_start = self._now()
@@ -212,24 +222,28 @@ class PatrolNavigator(Node):
 
         dist = math.hypot(tx - rx, ty - ry)
         approach = None
-        if dist > self.inspect_standoff + self.approach_reach:
-            approach = self._pull_back(tx, ty, rx, ry,
-                                       self.inspect_standoff, self.goal_clearance)
+        if dist > standoff + self.approach_reach:
+            approach = self._pull_back(tx, ty, rx, ry, standoff, self.goal_clearance)
         if approach is None:
             # 이미 충분히 가깝거나 접근 가능한 자리가 없음 → 그 자리에서 스캔
             self._approach_goal = None
             self._approach_arrived = True
             self._stop_here()
             self.get_logger().info(
-                f'👤 조난자 후보 ({tx:.1f}, {ty:.1f}) {dist:.1f}m — '
+                f'{label} ({tx:.1f}, {ty:.1f}) {dist:.1f}m — '
                 '접근 불필요/불가, 현 위치에서 조준 확인')
         else:
             self._approach_goal = approach
             self._send_goal(approach[0], approach[1],
                             yaw=math.atan2(ty - approach[1], tx - approach[0]))
             self.get_logger().info(
-                f'👤 조난자 후보 ({tx:.1f}, {ty:.1f}) {dist:.1f}m — '
+                f'{label} ({tx:.1f}, {ty:.1f}) {dist:.1f}m — '
                 f'({approach[0]:.1f}, {approach[1]:.1f}) 까지 접근 후 확인')
+
+    def fire_cand_cb(self, msg: PointStamped):
+        """열원 후보 — 조난자와 같은 정지·조준 확인. 다만 더 멀찍이 선다."""
+        self._inspect_req(msg.point.x, msg.point.y,
+                          self.fire_standoff, '🔥 열원 후보')
 
     def inspect_done_cb(self, msg: Bool):
         if self.state != INSPECT:
