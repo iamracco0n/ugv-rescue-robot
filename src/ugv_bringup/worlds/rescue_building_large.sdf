@@ -650,7 +650,7 @@
       <pose>-23.5 -16.0 0 0 0 0.9</pose>
     </include>
     <include>
-      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Male%20visitor</uri>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Standing%20person</uri>
       <name>victim_corridor_e</name>
       <static>true</static>
       <pose>24.0 0.5 0 0 0 3.14</pose>

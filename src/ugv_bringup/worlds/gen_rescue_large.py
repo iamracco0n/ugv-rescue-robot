@@ -194,8 +194,17 @@ person('victim_sitting_n4',  'PatientWheelChair',  12.0, 10.0, 0, 0, 0, 1.2)
 person('victim_bed_s4',      'TrolleyBedPatient',   9.0, -14.0, 0, 0, 0, 0.3)
 # 잔해에 반쯤 가린 사람 — 오탐 게이트와 접근 로직 시험용
 person('victim_occluded_s1', 'Casual%20female',   -23.5, -16.0, 0, 0, 0, 0.9)
-# 복도 동쪽 끝 — 이동 중 먼 거리에서 먼저 보이는 대상
-person('victim_corridor_e',  'Male%20visitor',     24.0, 0.5, 0, 0, 0, 3.14)
+# 복도 동쪽 끝 — 이동 중 먼 거리에서 먼저 보이는 대상.
+# 원래 'Male visitor' 를 썼는데 이 Fuel 자산만 <model> 이 아니라 <actor> 다
+# (걷기 애니메이션 + 자체 trajectory pose 0 1 0). 그래서
+#   · 실제 위치가 배치 좌표에서 로컬 +Y 로 1m 밀린다(yaw 3.14 라 월드 -Y).
+#     정답 좌표를 (24.0, 0.5) 로 알고 오차 1.0m 라 착각했었다.
+#   · 애니메이션이 스켈레톤을 움직여 YOLO 어깨 키포인트가 지면 0.38~0.39m
+#     로 잡힌다(거리 2.3~7.4m 전 구간에서 일관). 서 있는 사람인데 누움으로
+#     분류돼 L1 로 나왔다.
+# 걸어다니는 사람은 애초에 구조 대상이 아니므로 나머지 6명과 같은
+# 정적 모델로 통일한다.
+person('victim_corridor_e',  'Standing%20person',  24.0, 0.5, 0, 0, 0, 3.14)
 
 # 가린 사람 바로 앞 잔해
 box('debris_occluder', -22.6, -15.4, 0.55, 1.2, 0.9, 1.1,
