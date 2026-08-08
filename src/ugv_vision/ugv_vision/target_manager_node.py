@@ -355,6 +355,14 @@ class TargetManager(Node):
             self._finish_inspect(registered=False)
             return
 
+        # 접근하는 동안에도 조준 목표를 최신 탐지로 계속 갱신한다.
+        # 최초 추정만 붙들면, 로봇이 대상 앞으로 이동한 뒤 포탑이 엉뚱한 곳을
+        # 겨눠 "겨눴는데 대상 없음(유령 후보)" 으로 버려진다.
+        # (실측: 후보 7건 중 5건이 이 경로로 폐기)
+        # 포탑은 이 노드가 직접 제어하므로 목표를 바꿔도 충돌하지 않는다.
+        if target_fresh and self.last_msg is not None:
+            self._inspect_aim = self._estimate_xy(self.last_msg)
+
         # 3) 정지 + 조준이 붙었는지 확인 (대상이 안 보여도 정착 여부는 판정)
         settled = (self.robot_speed <= INSPECT_SETTLE_SPD
                    and abs(self._aim_yaw_error()) <= INSPECT_YAW_TOL)

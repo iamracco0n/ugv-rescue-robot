@@ -309,12 +309,16 @@ class YoloPoseNode(Node):
         if shin > 0 and ll > 0:
             if shin / ll > 1.5 and ll / tl < 0.65 and torso_from_vertical < 35.0:
                 return 'sitting'
-        elif ll > 0 and torso_from_vertical < 35.0:
+        elif ll > 0 and torso_from_vertical < 35.0 and tl >= 35.0:
             # 발목이 안 잡히는 경우(정강이 0px)가 흔하다. 휠체어는 다리가
             # 프레임 아래로 잘리거나 바퀴에 가려 발목 키포인트가 자주 빠진다.
             # 이때는 허벅지/몸통 비율만으로 판단한다.
-            # 실측: 서있음 0.72~0.74 / 앉음 0.42~0.56 → 0.62 로 가른다.
-            if ll / tl < 0.62:
+            # 실측: 서있음 0.72~0.74 / 앉음 0.42~0.56.
+            # 다만 이 단서 하나로는 약해서, 부분 관측된 서있는 사람이
+            # 앉음으로 넘어가 L2 로 과대평가되는 사례가 나왔다.
+            # → 임계를 0.58 로 좁히고, 몸통이 35px 이상 제대로 잡힌
+            #   관측에서만 적용한다(작게 잡힌 골격은 비율이 부정확).
+            if ll / tl < 0.58:
                 return 'sitting'
         return 'standing'
 
@@ -415,7 +419,14 @@ class YoloPoseNode(Node):
         if best:
             cx, cy, dist, raw_lv, _, _, bx1, by1, bx2, by2 = best
             self.label_history.append(raw_lv)
-            final_lv              = Counter(self.label_history).most_common(1)[0][0]
+            # 다수결이 아니라 '2프레임 이상 지지받은 것 중 가장 위중한 등급'.
+            # 구조에서는 과대평가보다 과소평가가 위험하다. 다수결을 쓰면
+            # 앉은 자세가 몇 프레임만 잡혀도 L3(정상)에 묻혀 사라진다.
+            # (실측: 휠체어 환자가 몸통-허벅지 46~56도로 잡히는 프레임이
+            #  있었는데도 L3 로 등록됐다)
+            counts = Counter(self.label_history)
+            supported = [lv for lv, n in counts.items() if n >= 2]
+            final_lv = min(supported) if supported else counts.most_common(1)[0][0]
             final_label, final_color = _TRIAGE_MAP.get(final_lv, ('Unknown',(255,255,255)))
 
             cv2.rectangle(frame, (bx1,by1), (bx2,by2), final_color, 4)
