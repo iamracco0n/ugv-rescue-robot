@@ -86,6 +86,9 @@ class PatrolNavigator(Node):
         # 조난자에 얼마나 가까이 가서 스캔할지
         self.declare_parameter('inspect_standoff', 1.5)     # 조난자에서 유지할 거리(m)
         self.declare_parameter('fire_standoff',    2.5)     # 열원에서 유지할 거리(m)
+        # 접근 못 하는 대상을 제자리에서 재도 되는 최대 거리. 이보다 멀면
+        # 정확도가 급격히 나빠지므로 확인을 보류하고 순찰을 이어간다.
+        self.declare_parameter('max_scan_dist',    3.0)
         self.declare_parameter('approach_reach',   0.45)    # 접근 지점 도달 판정(m)
         self.declare_parameter('frontier_reach',   0.8)     # 프론티어 goal 도달 판정(m)
 
@@ -105,6 +108,7 @@ class PatrolNavigator(Node):
         self.goal_clearance    = float(self.get_parameter('goal_clearance').value)
         self.inspect_standoff  = float(self.get_parameter('inspect_standoff').value)
         self.fire_standoff     = float(self.get_parameter('fire_standoff').value)
+        self.max_scan_dist     = float(self.get_parameter('max_scan_dist').value)
         self.approach_reach    = float(self.get_parameter('approach_reach').value)
         self.frontier_reach    = float(self.get_parameter('frontier_reach').value)
         self.explore_timeout   = float(self.get_parameter('explore_goal_timeout').value)
@@ -237,8 +241,20 @@ class PatrolNavigator(Node):
             # (obstacle_radius 1.3m) 그 안에 선 채로 두면 플래너가 막혀
             # "박힘 → 탈출" 을 무한 반복한다(실측: 7분에 11회, 전부 화재 옆).
             approach = self._retreat_point(tx, ty, rx, ry, standoff)
+        if approach is None and dist > self.max_scan_dist:
+            # 접근할 자리를 못 찾았는데 대상이 멀다 → 그 자리에서 재면 부정확하다.
+            # 실측: 7.7m 에서 스캔한 건이 산포 0.58m 로 등록됐고 실재하지 않는
+            # 조난자였다(정상 등록은 산포 0.00~0.05m). 차라리 넘기고 순찰을
+            # 이어가면, 나중에 가까이 지나갈 때 제대로 잡는다.
+            self.get_logger().info(
+                f'{label} ({tx:.1f}, {ty:.1f}) {dist:.1f}m — 접근 불가하고 너무 멀어 '
+                '확인 보류 (순찰 계속)')
+            self.state = self._state_before_inspect or PATROL
+            self._inspect_pos = None
+            return
+
         if approach is None:
-            # 이미 충분히 가깝거나 접근 가능한 자리가 없음 → 그 자리에서 스캔
+            # 이미 충분히 가까움 → 그 자리에서 스캔
             self._approach_goal = None
             self._approach_arrived = True
             self._stop_here()
