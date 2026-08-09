@@ -20,15 +20,14 @@ LOG=${4:-/tmp/ugv_eval_${WORLD}.log}
 WS=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TRUTH=$(mktemp /tmp/ugv_truth_XXXX.json)
 
+# 정리는 '내가 띄운 프로세스 그룹' 만 죽인다.
+# 예전에는 ps 로 찾아 머신 전체에서 kill 했다. 한 머신에서 검증을 두 개
+# 동시에 돌리면 먼저 끝난 쪽이 다른 쪽을 죽인다(수집에서 실측: 100초에
+# SIGKILL 로 전멸). setsid 로 각자 프로세스 그룹을 갖게 해 그룹만 정리한다.
 cleanup() {
-  [ -n "${LAUNCH_PID:-}" ] && kill "$LAUNCH_PID" 2>/dev/null
+  [ -n "${LAUNCH_PID:-}" ] && kill -- -"$LAUNCH_PID" 2>/dev/null
   sleep 3
-  # 패턴 kill 은 자기 셸까지 잡으므로 PID 로만 정리한다
-  for p in $(ps -eo pid,args --no-headers \
-             | grep -E 'gz sim|ugv_vision|nav2_|slam_toolbox|ros_gz_bridge|robot_state_publisher|lifecycle_manager' \
-             | grep -v grep | awk '{print $1}'); do
-    [ "$p" != "$$" ] && kill -9 "$p" 2>/dev/null
-  done
+  [ -n "${LAUNCH_PID:-}" ] && kill -9 -- -"$LAUNCH_PID" 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -68,7 +67,7 @@ export GZ_SIM_RESOURCE_PATH="$WS/install/ugv_description/share:${GZ_SIM_RESOURCE
 
 # 탐사 성향은 환경변수로 덮어쓸 수 있다(파라미터 스윕용)
 #   BUDGET=90 RADIUS=4 tools/run_eval.sh ...
-ros2 launch ugv_bringup patrol_sim.launch.py \
+setsid ros2 launch ugv_bringup patrol_sim.launch.py \
      world:="$WORLD" expected_victims:="$VICTIMS" headless:=true \
      room_clear_budget_s:="${BUDGET:-240.0}" \
      sweep_first_radius:="${RADIUS:-5.0}" \

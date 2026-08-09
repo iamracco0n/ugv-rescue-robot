@@ -18,14 +18,18 @@ WS=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TRUTH=$(mktemp /tmp/ugv_truth_XXXX.json)
 LOG=/tmp/collect_${WORLD}.log
 
+# 정리는 '내가 띄운 프로세스 그룹' 만 죽인다.
+# 예전에는 ps 로 gz sim·ugv_vision 등을 찾아 머신 전체에서 kill 했다.
+# 한 머신에서 수집 두 개를 동시에 돌리면 먼저 끝난 쪽이 다른 쪽을
+# 죽여버린다(실측: 미니맵 수집이 100초에 SIGKILL 로 전멸, 0장 수집).
+# setsid 로 각자 프로세스 그룹을 갖게 하고 그 그룹만 정리한다.
 cleanup() {
-  [ -n "${LAUNCH_PID:-}" ] && kill "$LAUNCH_PID" 2>/dev/null
-  [ -n "${CAP_PID:-}" ] && kill "$CAP_PID" 2>/dev/null
+  for pg in "${LAUNCH_PID:-}" "${CAP_PID:-}"; do
+    [ -n "$pg" ] && kill -- -"$pg" 2>/dev/null
+  done
   sleep 3
-  for p in $(ps -eo pid,args --no-headers \
-             | grep -E 'gz sim|ugv_vision|nav2_|slam_toolbox|ros_gz_bridge|robot_state_publisher|lifecycle_manager' \
-             | grep -v grep | awk '{print $1}'); do
-    [ "$p" != "$$" ] && kill -9 "$p" 2>/dev/null
+  for pg in "${LAUNCH_PID:-}" "${CAP_PID:-}"; do
+    [ -n "$pg" ] && kill -9 -- -"$pg" 2>/dev/null
   done
 }
 trap cleanup EXIT
@@ -42,14 +46,15 @@ source "$WS/install/setup.bash"
 export GZ_SIM_RESOURCE_PATH="$WS/install/ugv_description/share:${GZ_SIM_RESOURCE_PATH:-}"
 
 echo "월드=$WORLD  시간=${DURATION}초  출력=$OUT"
-ros2 launch ugv_bringup patrol_sim.launch.py \
+# setsid: 자기 프로세스 그룹의 리더가 되게 해 그룹 단위로 정리할 수 있다
+setsid ros2 launch ugv_bringup patrol_sim.launch.py \
      world:="$WORLD" expected_victims:="$VICTIMS" headless:=true \
      > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 
 # 비전 노드가 뜬 뒤에 수집을 붙인다(런치 58초 스케줄)
 sleep 70
-ros2 run ugv_vision dataset_capture_node --ros-args \
+setsid ros2 run ugv_vision dataset_capture_node --ros-args \
      -p truth_json:="$TRUTH" -p out_dir:="$OUT" \
      >> "$LOG" 2>&1 &
 CAP_PID=$!
