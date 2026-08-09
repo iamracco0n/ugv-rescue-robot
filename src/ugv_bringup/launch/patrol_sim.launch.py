@@ -56,12 +56,6 @@ def generate_launch_description():
         'sweep_first_radius', default_value='5.0',
         description='이 반경 안의 미관측을 먼저 훑는다(m)')
 
-    # 이 환경으로 파인튜닝한 사람 검출기(선택). 지정하면 pose 결과를
-    # 한 번 더 걸러 유령(잔해 오인)을 막는다. 비우면 기존 동작.
-    filter_arg = DeclareLaunchArgument(
-        'filter_model', default_value='',
-        description='파인튜닝 검출기 가중치 경로 (tools/train_yolo.py 산출물)')
-
     # 1. Gazebo + Robot + 브리지 + RViz (열화상 브리지 포함)
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -113,10 +107,7 @@ def generate_launch_description():
         actions=[
             Node(package='ugv_vision', executable='yolo_pose_node',
                  name='yolo_pose_node',
-                 parameters=[{
-                     'use_sim_time': True,
-                     'filter_model': LaunchConfiguration('filter_model'),
-                 }], output='screen'),
+                 parameters=[{'use_sim_time': True}], output='screen'),
             Node(package='ugv_vision', executable='target_manager_node',
                  name='target_manager_node',
                  parameters=[{'use_sim_time': True}], output='screen'),
@@ -157,7 +148,6 @@ def generate_launch_description():
         headless_arg,
         budget_arg,
         radius_arg,
-        filter_arg,
         gazebo_launch,
         slam_launch,
         nav2_launch,

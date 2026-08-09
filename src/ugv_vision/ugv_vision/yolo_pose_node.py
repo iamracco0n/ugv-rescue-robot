@@ -72,30 +72,6 @@ class YoloPoseNode(Node):
         except Exception:
             self.device = 'cpu'
         self.get_logger().info(f'YOLO 추론 device = {self.device}')
-        self._device = self.device
-
-        # 이 환경으로 파인튜닝한 사람 검출기(선택). 지정하면 pose 결과를
-        # 이 검출기로 한 번 더 거른다 — 유령(잔해를 사람으로 오인) 차단용.
-        # 비워두면 기존 동작 그대로다.
-        #   tools/collect_dataset.sh → tools/train_yolo.py → best.pt
-        self.declare_parameter('filter_model', '')
-        self.declare_parameter('filter_conf', 0.35)
-        self.declare_parameter('filter_iou', 0.30)
-        self.filter_conf = float(self.get_parameter('filter_conf').value)
-        self.filter_iou = float(self.get_parameter('filter_iou').value)
-        self._filter_model = None
-        self._filter_boxes = None
-        fm = str(self.get_parameter('filter_model').value).strip()
-        if fm:
-            fm = os.path.expanduser(fm)
-            if os.path.exists(fm):
-                try:
-                    self._filter_model = YOLO(fm)
-                    self.get_logger().info(f'검출 필터 사용: {fm}')
-                except Exception as e:
-                    self.get_logger().error(f'검출 필터 로드 실패 — 미사용: {e}')
-            else:
-                self.get_logger().error(f'검출 필터 파일 없음 — 미사용: {fm}')
 
         ml_path     = os.path.join(model_dir, 'triage_model_rf_robust.pkl')
         scaler_path = os.path.join(model_dir, 'triage_scaler_robust.pkl')
@@ -185,8 +161,7 @@ class YoloPoseNode(Node):
         c = self._reject_counts
         self.get_logger().info(
             f'[오탐 게이트] 기각 15s: 키포인트={c.get("kpt",0)} '
-            f'박스크기={c.get("geom",0)} depth불일치={c.get("depth",0)} '
-            f'검출필터={c.get("filter",0)}')
+            f'박스크기={c.get("geom",0)} depth불일치={c.get("depth",0)}')
         for k in c:
             c[k] = 0
 
@@ -259,53 +234,6 @@ class YoloPoseNode(Node):
         return (_FOCAL_PX * _BODY_DIAG) / pixel_diag
 
     # ── 사람 판정 게이트 (벽·기둥 오탐 억제) ─────────────────────────
-    def _run_filter(self, frame):
-        """이 환경으로 파인튜닝한 검출기로 사람 박스를 구한다.
-
-        기본 가중치(COCO)는 Gazebo 잔해에 사람 골격을 그린다. 그 유령에
-        접근·정지·조준하느라 탐사 시간의 30%를 쓴다. 거리·지속성 어느
-        신호로도 진짜와 구분되지 않아(README), 인식기 자체를 이 환경에
-        맞추는 쪽이 근본적이다.
-
-        자세 판정은 pose 모델이 계속 맡는다 — 키포인트 정답이 없어 pose
-        모델은 재학습할 수 없다. 그래서 검출기는 '관문' 으로만 쓴다.
-        """
-        if self._filter_model is None:
-            return None
-        try:
-            res = self._filter_model(frame, verbose=False,
-                                     conf=self.filter_conf,
-                                     device=self._device)
-        except Exception as e:
-            self.get_logger().warn(
-                f'검출 필터 실패 — 필터 없이 진행: {e}',
-                throttle_duration_sec=30.0)
-            self._filter_model = None
-            return None
-        boxes = []
-        for r in res:
-            if r.boxes is None:
-                continue
-            boxes.extend(r.boxes.xyxy.cpu().numpy().tolist())
-        return boxes
-
-    def _filter_ok(self, x1, y1, x2, y2):
-        """pose 가 잡은 박스를 필터 검출기가 인정하는지(IoU 기준)."""
-        if self._filter_boxes is None:      # 필터 미사용
-            return True
-        for fx1, fy1, fx2, fy2 in self._filter_boxes:
-            ix1, iy1 = max(x1, fx1), max(y1, fy1)
-            ix2, iy2 = min(x2, fx2), min(y2, fy2)
-            iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-            inter = iw * ih
-            if inter <= 0:
-                continue
-            a = (x2 - x1) * (y2 - y1)
-            b = (fx2 - fx1) * (fy2 - fy1)
-            if inter / max(1e-6, a + b - inter) >= self.filter_iou:
-                return True
-        return False
-
     def _person_gate(self, kconf, x1, y1, x2, y2, dist_depth, dist_diag):
         """사람으로 인정할지 판정. (통과여부, 사유) 반환.
 
@@ -509,8 +437,6 @@ class YoloPoseNode(Node):
 
         results  = self.model(frame, verbose=False, device=self.device,
                               conf=self.det_conf)
-        # 프레임당 한 번만 돌린다(박스마다 돌리면 추론이 배로 든다)
-        self._filter_boxes = self._run_filter(frame)
         best     = None
         min_dx   = float('inf')
 
@@ -534,8 +460,6 @@ class YoloPoseNode(Node):
 
                 ok, why = self._person_gate(kconf, x1, y1, x2, y2,
                                             dist_depth, dist_diag)
-                if ok and not self._filter_ok(x1, y1, x2, y2):
-                    ok, why = False, 'filter'
                 if not ok:
                     self._reject_counts[why] = self._reject_counts.get(why, 0) + 1
                     # 기각된 후보는 회색 점선 박스로만 표시 (튜닝용)
