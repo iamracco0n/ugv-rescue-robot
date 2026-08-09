@@ -54,8 +54,12 @@ source /opt/ros/humble/setup.bash
 source "$WS/install/setup.bash"
 export GZ_SIM_RESOURCE_PATH="$WS/install/ugv_description/share:${GZ_SIM_RESOURCE_PATH:-}"
 
+# 탐사 성향은 환경변수로 덮어쓸 수 있다(파라미터 스윕용)
+#   BUDGET=90 RADIUS=4 tools/run_eval.sh ...
 ros2 launch ugv_bringup patrol_sim.launch.py \
      world:="$WORLD" expected_victims:="$VICTIMS" headless:=true \
+     room_clear_budget_s:="${BUDGET:-180.0}" \
+     sweep_first_radius:="${RADIUS:-5.0}" \
      > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 

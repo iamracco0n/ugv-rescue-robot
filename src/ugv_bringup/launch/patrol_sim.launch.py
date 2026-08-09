@@ -45,6 +45,16 @@ def generate_launch_description():
         'headless', default_value='false',
         description='true 면 gz GUI·RViz 없이 서버만 실행')
 
+    # 탐사 성향 조절 — 파라미터 스윕으로 최적값을 찾기 위해 런치에서 연다.
+    # 노드는 초기화 때 한 번만 읽으므로 런타임 param set 으로는 못 바꾼다.
+    budget_arg = DeclareLaunchArgument(
+        'room_clear_budget_s', default_value='180.0',
+        description='한 구역을 마무리하는 데 쓸 최대 시간(초). '
+                    '크면 꼼꼼하고 느리다')
+    radius_arg = DeclareLaunchArgument(
+        'sweep_first_radius', default_value='5.0',
+        description='이 반경 안의 미관측을 먼저 훑는다(m)')
+
     # 1. Gazebo + Robot + 브리지 + RViz (열화상 브리지 포함)
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -116,6 +126,8 @@ def generate_launch_description():
                      'use_sim_time': True,
                      'patrol_enabled_on_boot': LaunchConfiguration('patrol_enabled_on_boot'),
                      'expected_victims': LaunchConfiguration('expected_victims'),
+                     'room_clear_budget_s': LaunchConfiguration('room_clear_budget_s'),
+                     'sweep_first_radius': LaunchConfiguration('sweep_first_radius'),
                  }], output='screen'),
         ]
     )
@@ -125,6 +137,8 @@ def generate_launch_description():
         victims_arg,
         world_arg,
         headless_arg,
+        budget_arg,
+        radius_arg,
         gazebo_launch,
         slam_launch,
         nav2_launch,
