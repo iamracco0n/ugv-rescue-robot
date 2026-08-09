@@ -67,11 +67,16 @@ export GZ_SIM_RESOURCE_PATH="$WS/install/ugv_description/share:${GZ_SIM_RESOURCE
 
 # 탐사 성향은 환경변수로 덮어쓸 수 있다(파라미터 스윕용)
 #   BUDGET=90 RADIUS=4 tools/run_eval.sh ...
+# 빈 값을 넘기면 런치가 거부한다 — 'filter_model:=' 는 malformed 다.
+# (실측: 필터 없는 A 런이 아예 기동하지 않아 A/B 비교가 무효였다)
+# 그래서 값이 있을 때만 인자를 붙인다.
+FILTER_ARG=()
+[ -n "${FILTER:-}" ] && FILTER_ARG=(filter_model:="$FILTER")
 setsid ros2 launch ugv_bringup patrol_sim.launch.py \
      world:="$WORLD" expected_victims:="$VICTIMS" headless:=true \
      room_clear_budget_s:="${BUDGET:-240.0}" \
      sweep_first_radius:="${RADIUS:-5.0}" \
-     filter_model:="${FILTER:-}" \
+     "${FILTER_ARG[@]}" \
      > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 
