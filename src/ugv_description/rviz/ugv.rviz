@@ -54,34 +54,22 @@ Visualization Manager:
     #  [6] Robot/Trail/Path
     # ════════════════════════════════════════════════════
 
-    # [1] 안개 (미수색 자유공간 = 검정)
-    #     map scheme: value 100 = 검정
-    - Alpha: 0.90
+    # [1] 전장의 안개 — 아직 안 본 곳을 어둡게 덮는다 (patrol_navigator 발행)
+    #     검정(100) = 가본 적 없음 / 회색(55) = 지나갔지만 눈으로 미확인
+    #     투명(-1)  = 카메라로 확인 완료 → SLAM 맵이 그대로 보임
+    #     map scheme 은 값이 클수록 어둡게 칠하므로 안개처럼 보인다.
+    #     (costmap scheme 은 형광 분홍이라 눈이 아프다)
+    - Alpha: 0.85
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Enabled: true
       Name: Fog_of_War
       Topic:
-        Depth: 5
+        Depth: 1
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /viz/seen_persistent
-      Value: true
-
-    # [2] 수색 기억 (30초+ 지난 곳 = 밝은 회색)
-    #     map scheme: value 30 = 밝은 회색
-    - Alpha: 0.70
-      Class: rviz_default_plugins/Map
-      Color Scheme: map
-      Enabled: true
-      Name: Seen_Memory
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /viz/seen_recent
+        Value: /coverage_map
       Value: true
 
     # [3] 관측된 벽 = 흰색 (map scheme: value 0 = 흰색)

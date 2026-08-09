@@ -294,11 +294,18 @@ class PatrolNavigator(Node):
         self.cmd_pub    = self.create_publisher(Twist, '/cmd_vel', 10)
         # 한 바퀴 수색 완료 신호
         self.sweep_pub  = self.create_publisher(Bool, '/sweep_complete', 10)
+        # 카메라로 실제 훑은 구역 / 아직 못 본 구역을 눈으로 구분하기 위한 격자.
+        # SLAM 맵은 '라이다가 지나갔나' 만 보여주므로, 방을 통과만 하고 구석을
+        # 안 본 경우가 지도상으로는 멀쩡해 보인다. 로그의 '미관측 279m²' 가
+        # 어디를 말하는지 화면에서 볼 수 없었다.
+        self.cover_pub  = self.create_publisher(OccupancyGrid, '/coverage_map', 1)
 
         self.create_timer(0.5, self.tick)     # 2 Hz FSM
         # 탈출 명령은 20Hz 로 낸다. Nav2 컨트롤러도 /cmd_vel 에 20Hz 로 0을
         # 쏘고 있어서, FSM 주기(2Hz)로 보내면 그 사이 0에 묻혀 로봇이 안 움직인다.
         self.create_timer(0.05, self._escape_cmd_tick)
+        # 커버리지 격자는 크고 자주 안 바뀌므로 저주기로만 발행
+        self.create_timer(2.0, self._publish_coverage)
 
         if self.patrol_mode == 'explore':
             self.get_logger().info(
@@ -469,6 +476,38 @@ class PatrolNavigator(Node):
         else:
             unseen_area = float((free & ~self._seen).sum()) * res * res
         return (frontier_cells, unseen_area)
+
+    def _publish_coverage(self):
+        """수색 커버리지를 /coverage_map 으로 발행 (RViz Map 디스플레이용).
+
+        게임의 전장의 안개처럼 '아직 안 본 곳' 을 어둡게 덮는다.
+        RViz 'map' 색상표는 값이 클수록 어둡고 -1 은 투명이므로:
+          100 = 미탐사(가본 적 없음)        → 완전한 검정
+           55 = 라이다만 지나감, 눈으로 미확인 → 회색 안개
+           -1 = 카메라로 확인 완료 / 벽      → 투명 (SLAM 맵이 그대로 보임)
+        중간 단계를 둔 이유는 둘이 전혀 다른 상태이기 때문이다. SLAM 맵만
+        보면 방을 통과만 해도 다 아는 것처럼 보이지만, 구석을 눈으로 안
+        봤으면 조난자를 놓친 것이다.
+        """
+        g = self._map_msg
+        if g is None:
+            return
+        W, H = g.info.width, g.info.height
+        arr = np.asarray(g.data, dtype=np.int16).reshape(H, W)
+        free = (arr >= 0) & (arr < 25)
+        unknown = arr < 0
+        out = np.full((H, W), -1, dtype=np.int8)
+        out[unknown] = 100                       # 가본 적 없음 = 짙은 안개
+        if self._seen is not None and self._seen.shape == free.shape:
+            out[free & ~self._seen] = 55         # 지나갔지만 눈으로 못 봄
+        else:
+            out[free] = 55
+        m = OccupancyGrid()
+        m.header.frame_id = 'map'
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.info = g.info
+        m.data = out.reshape(-1).tolist()
+        self.cover_pub.publish(m)
 
     def _known_free_area(self) -> float:
         """지금까지 매핑된 자유공간 넓이(m^2). 수색 완료 판정의 최소 근거."""
