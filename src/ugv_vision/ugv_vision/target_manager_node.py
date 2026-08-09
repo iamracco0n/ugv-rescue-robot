@@ -11,7 +11,6 @@ v7 — SEARCH-only + 블라인드코너 지능형 스캔
   → 코너 없으면 ±50° 사인파 폴백
 """
 import math
-from collections import deque
 
 import rclpy
 import rclpy.time
@@ -60,27 +59,6 @@ CONFIRM_N        = 3      # 연속 탐지 횟수 — 오탐 방지
 # 이동 중에 등록하면 로봇 자세·포탑 각도가 계속 변해 위치가 튄다.
 # → 후보를 보면 즉시 정지 요청하고, 멈춘 뒤 포탑을 조준해서 등록한다.
 INSPECT_TRIGGER_N   = 3                   # 정지 요청까지 필요한 연속 '탐지 메시지' 수
-# 후보를 믿기 전에 '얼마나 오래·얼마나 안정적으로' 보였는지를 함께 본다.
-#
-# 유령 후보(겨눴는데 대상 없음)에 탐사 시간의 상당 부분을 쓴다.
-# 실측(큰 월드 57분, 예산 240초): 유령 17건 / 정상 등록 7건.
-# 접근·정지·조준에 건당 최대 28초라 20분 가까이 낭비된다.
-#
-# 거리로는 못 거른다 — 유령 중앙 3.0m, 진짜 중앙 3.3m 로 겹친다.
-# 차이는 '지속성' 이다. 탐지 메시지 3건이면 14Hz 기준 0.2초에 불과해,
-# 잔해에 잠깐 뜬 골격도 그대로 통과한다.
-# 그래서 최소 지속 시간과 좌표 안정성을 함께 요구한다. 진짜 사람은
-# 접근하는 동안 계속 보이고 좌표도 한 자리에 머문다.
-INSPECT_MIN_PERSIST_S = 1.0               # 이 시간 이상 보여야 정지한다
-INSPECT_CONSIST_R     = 0.60              # 최근 추정 좌표가 이 반경 안에 모여야 (m)
-INSPECT_TRACK_N       = 12                # 안정성 판단에 쓰는 최근 표본 수
-# 탐지가 끊겨도 이 시간까지는 같은 후보로 이어 본다.
-# 포탑이 ±50도로 스윕하므로 사람은 시야에 들락날락한다. 끊길 때마다
-# 기록을 지우면 '연속 1초'를 채우는 것이 구조적으로 불가능해져 진짜
-# 조난자까지 전부 기각된다(실측: 기각 67건 중 66건이 '시간 부족',
-# 조난자 7/7 → 2/7 로 악화). 끊김을 허용하되, 다른 대상과 섞이는 것은
-# 좌표 안정성(INSPECT_CONSIST_R)이 막는다.
-INSPECT_TRACK_GAP_S   = 3.0
 INSPECT_SETTLE_SPD  = 0.05                # 정지 판정 속도 (m/s)
 INSPECT_YAW_TOL     = math.radians(4.0)   # 포탑 조준 완료 판정 오차
 INSPECT_SAMPLES     = 5                   # 정지·조준 상태에서 모을 표본 수
@@ -166,8 +144,6 @@ class TargetManager(Node):
         self.last_manual_t = None
         self._detect_streak = 0
         self._last_streak_stamp = 0   # 같은 탐지 메시지를 중복으로 세지 않기 위함
-        # 후보 추적: (시각, x, y). 지속 시간·좌표 안정성 판단용.
-        self._cand_track: deque = deque(maxlen=INSPECT_TRACK_N)
 
         self._prev_pitch_vel = 0.0
         self._loop_dt        = 0.05
@@ -371,28 +347,6 @@ class TargetManager(Node):
 
     # ── 정지 조준 확인(INSPECT) ────────────────────────────────────────
 
-    def _candidate_stable(self):
-        """정지·접근할 만한 후보인지. (통과여부, 사유).
-
-        유령 후보 한 건에 접근·정지·조준으로 최대 28초를 쓴다. 실측에서
-        유령 17건 / 진짜 7건이라 탐사 시간의 상당 부분이 여기로 샜다.
-        거리로는 못 거른다(유령 중앙 3.0m vs 진짜 3.3m 로 겹침).
-        갈리는 것은 '얼마나 오래, 얼마나 한 자리에서' 보였는가다.
-        """
-        if len(self._cand_track) < INSPECT_TRIGGER_N:
-            return False, '표본부족'
-        span = self._cand_track[-1][0] - self._cand_track[0][0]
-        if span < INSPECT_MIN_PERSIST_S:
-            return False, f'{span:.1f}s만 보임'
-        xs = sorted(p[1] for p in self._cand_track)
-        ys = sorted(p[2] for p in self._cand_track)
-        mx, my = xs[len(xs) // 2], ys[len(ys) // 2]
-        spread = max(math.hypot(x - mx, y - my)
-                     for _, x, y in self._cand_track)
-        if spread > INSPECT_CONSIST_R:
-            return False, f'좌표 산포 {spread:.1f}m'
-        return True, ''
-
     def _inspect_step(self, now_sec: float, target_fresh: bool):
         """후보 발견 → 정지 요청 → 조준 완료 후 표본 수집 → 등록.
 
@@ -403,12 +357,6 @@ class TargetManager(Node):
         if (not self._inspect_active and target_fresh
                 and self._detect_streak >= INSPECT_TRIGGER_N
                 and self.last_msg is not None):
-            ok, why = self._candidate_stable()
-            if not ok:
-                self.get_logger().info(
-                    f'후보 불안정({why}) — 정지하지 않고 순찰 계속',
-                    throttle_duration_sec=10.0)
-                return
             gx, gy = self._estimate_xy(self.last_msg)
             # 이미 아는 사람이어도, 훨씬 가까이서 다시 보게 됐다면 확인을
             # 진행해 좌표를 정밀화한다(멀리서 먼저 잡힌 등록을 고쳐 쓴다).
@@ -663,18 +611,9 @@ class TargetManager(Node):
             if stamp != self._last_streak_stamp:
                 self._last_streak_stamp = stamp
                 self._detect_streak += 1
-                # 지속 시간·좌표 안정성 판단용으로 추정 좌표를 남긴다
-                if not self._inspect_active:
-                    gx, gy = self._estimate_xy(self.last_msg)
-                    self._cand_track.append((now_sec, gx, gy))
         else:
             self._detect_streak = 0
             self._last_streak_stamp = 0
-        # 탐지가 끊겨도 곧바로 지우지 않는다(포탑 스윕으로 시야를 들락날락).
-        # 오래 안 보이면 그때 버린다.
-        if (self._cand_track
-                and now_sec - self._cand_track[-1][0] > INSPECT_TRACK_GAP_S):
-            self._cand_track.clear()
 
         self._inspect_step(now_sec, target_fresh)
 
