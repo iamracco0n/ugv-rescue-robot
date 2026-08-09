@@ -96,6 +96,8 @@ class PatrolNavigator(Node):
         self.declare_parameter('explore_goal_timeout_max', 150.0)
         # 지역 루프 탈출 시 최소 이 거리 이상 떨어진 목표를 고른다(m)
         self.declare_parameter('far_goal_min_dist', 8.0)
+        # 직선 접근이 막혔을 때 대상 주위를 몇 방향까지 뒤질지
+        self.declare_parameter('approach_ring_n', 12)
         # 장애물 탈출
         self.declare_parameter('stuck_confirm_s', 8.0)      # 이만큼 안 움직이면 박힘으로 판단
         self.declare_parameter('stuck_move_eps',  0.15)     # 이 이상 움직이면 정상(m)
@@ -149,6 +151,11 @@ class PatrolNavigator(Node):
         # 실제로 '남은 양' 이 이 이하일 때만 완료로 인정한다
         self.declare_parameter('done_frontier_cells', 40)     # 미탐사 경계 셀
         self.declare_parameter('done_unseen_area', 8.0)       # 미관측 자유공간 m^2
+        # 절대 면적만 쓰면 맵 크기에 종속된다. 8m^2 는 작은 월드(320m^2)에선
+        # 2.5% 지만 큰 월드(2240m^2)에선 0.36% 라, 전원을 찾고도 완료 보고가
+        # 영영 안 났다. 매핑된 자유공간의 비율 기준을 함께 두고 둘 중
+        # 느슨한 쪽을 쓴다.
+        self.declare_parameter('done_unseen_frac', 0.02)      # 자유공간 대비 2%
         # 구조본부가 알려준 실종자 수. 0이면 모름(면적 기준만 사용).
         # 이 수를 다 찾기 전에는 수색을 끝내지 않고 재수색한다.
         self.declare_parameter('expected_victims', 0)
@@ -176,6 +183,7 @@ class PatrolNavigator(Node):
         self.explore_speed     = float(self.get_parameter('explore_assumed_speed').value)
         self.explore_tmo_max   = float(self.get_parameter('explore_goal_timeout_max').value)
         self.far_goal_min_dist = float(self.get_parameter('far_goal_min_dist').value)
+        self.approach_ring_n   = int(self.get_parameter('approach_ring_n').value)
         self._explore_budget   = self.explore_timeout   # 현재 goal 의 제한시간(초)
         self.stuck_confirm_s   = float(self.get_parameter('stuck_confirm_s').value)
         self.stuck_move_eps    = float(self.get_parameter('stuck_move_eps').value)
@@ -195,6 +203,7 @@ class PatrolNavigator(Node):
         self.min_area_for_sweep  = float(self.get_parameter('min_area_for_sweep').value)
         self.done_frontier_cells = int(self.get_parameter('done_frontier_cells').value)
         self.done_unseen_area    = float(self.get_parameter('done_unseen_area').value)
+        self.done_unseen_frac    = float(self.get_parameter('done_unseen_frac').value)
         self.expected_victims    = int(self.get_parameter('expected_victims').value)
 
         # ── 상태 ─────────────────────────────────────────────────────
@@ -341,6 +350,14 @@ class PatrolNavigator(Node):
             # (obstacle_radius 1.3m) 그 안에 선 채로 두면 플래너가 막혀
             # "박힘 → 탈출" 을 무한 반복한다(실측: 7분에 11회, 전부 화재 옆).
             approach = self._retreat_point(tx, ty, rx, ry, standoff)
+        if approach is None and dist > standoff + self.approach_reach:
+            # 직선 접근이 막혔다 → 대상 주위를 둘러 설 자리를 찾는다
+            approach = self._approach_ring(tx, ty, rx, ry, standoff,
+                                           self.goal_clearance)
+            if approach is not None:
+                self.get_logger().info(
+                    f'{label} 직선 접근 막힘 — 우회 지점 '
+                    f'({approach[0]:.1f}, {approach[1]:.1f}) 으로 접근')
         if approach is None and dist > self.max_scan_dist:
             # 접근할 자리를 못 찾았는데 대상이 멀다 → 그 자리에서 재면 부정확하다.
             # 실측: 7.7m 에서 스캔한 건이 산포 0.58m 로 등록됐고 실재하지 않는
@@ -659,6 +676,35 @@ class PatrolNavigator(Node):
                 return (px, py)
             back += 0.25
         return None
+
+    def _approach_ring(self, tx, ty, rx, ry, standoff, clearance):
+        """대상을 중심으로 반경 standoff 원 위에서 접근 가능한 지점을 찾는다.
+
+        _pull_back 은 로봇→대상 '직선' 위만 뒤지므로, 그 선이 잔해나 벽으로
+        막히면 곧바로 포기한다. 그러면 조난자를 눈앞에 두고도 확인을 보류하고
+        지나간다(실측: 3.2m 앞 후보를 '접근 불가'로 건너뜀).
+        대상 주위 어느 방향이든 설 자리가 있으면 거기서 확인하면 된다.
+        로봇에 가까운 방향부터 시도해 불필요하게 돌아가지 않게 한다.
+        """
+        base = math.atan2(ry - ty, rx - tx)      # 대상에서 로봇을 보는 방향
+        step_ang = 2.0 * math.pi / self.approach_ring_n
+        best = None
+        best_d = float('inf')
+        # base(정면)부터 시작해 좌우로 대칭으로 벌려간다.
+        for k in range(self.approach_ring_n // 2 + 1):
+            delta = k * step_ang
+            for sign in ((1,) if k == 0 else (1, -1)):
+                ang = base + sign * delta
+                px = tx + standoff * math.cos(ang)
+                py = ty + standoff * math.sin(ang)
+                if not self._is_free(px, py, clearance):
+                    continue
+                d = math.hypot(px - rx, py - ry)
+                if d < best_d:
+                    best_d, best = d, (px, py)
+            if best is not None and delta > math.pi / 2:
+                break            # 충분히 돌아봤고 답이 있으면 멈춘다
+        return best
 
     def _report_mission(self, sweep_n: int):
         """건물을 한 바퀴 다 훑을 때마다 수색 결과를 요약 보고한다.
@@ -1080,8 +1126,16 @@ class PatrolNavigator(Node):
         self._frontier_t = now
         if nxt is None:
             fr_cells, unseen = self._coverage_left()
+            unseen_budget = max(self.done_unseen_area,
+                                self._known_free_area() * self.done_unseen_frac)
             covered = (fr_cells <= self.done_frontier_cells
-                       and unseen <= self.done_unseen_area)
+                       and unseen <= unseen_budget)
+            self.get_logger().info(
+                f'수색 진행 — 미탐사 경계 {fr_cells}셀(완료 기준 '
+                f'{self.done_frontier_cells}), 미관측 {unseen:.1f}m²(기준 '
+                f'{unseen_budget:.1f}), 조난자 {len(self._victims)}'
+                + (f'/{self.expected_victims}' if self.expected_victims > 0 else '')
+                + '명', throttle_duration_sec=60.0)
             explored_enough = (self._goals_done >= self.min_goals_for_sweep
                                and self._known_free_area() >= self.min_area_for_sweep)
             # 실종자 수를 아는 경우, 다 찾기 전에는 완료로 보지 않는다.

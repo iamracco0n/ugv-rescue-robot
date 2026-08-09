@@ -525,6 +525,15 @@ class FireDetectionNode(Node):
         if not self._ci_active:
             return
         now_s = self.get_clock().now().nanoseconds * 1e-9
+        # 정착 판정은 열원이 보이지 않아도 진행돼야 한다.
+        # _observe_fire 안에서만 갱신하면, 멈추고 겨눴는데 열원이 화면에서
+        # 안 잡히는 경우 정착이 영영 기록되지 않는다. 그러면 아래
+        # '겨눴는데 열원 없음' 경로가 막혀 28초 타임아웃을 통째로 쓰고,
+        # 로그에는 속도 0.000·조준오차 0.0° 인데 '정착 X' 라는 모순이 남는다.
+        if self._ci_settled is None and self._ci_aim is not None:
+            if (self.robot_speed <= self.insp_settle
+                    and abs(self._aim_yaw_error()) <= self.insp_yaw_tol):
+                self._ci_settled = now_s
         lost = now_s - self._ci_seen_t
         if now_s - self._ci_start > self.insp_timeout:
             self.get_logger().warn(
