@@ -3,6 +3,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
                             TimerAction)
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch.substitutions import (Command, LaunchConfiguration,
@@ -28,16 +29,34 @@ def generate_launch_description():
     world_file = PathJoinSubstitution(
         [pkg_bringup, 'worlds', [world, TextSubstitution(text='.sdf')]])
 
+    # 헤드리스: gz GUI 와 RViz 를 끈다. 자동 채점(tools/run_eval.sh)처럼
+    # 화면이 필요 없는 검증에서 CPU 를 크게 아낀다 — GUI 렌더가 서버와
+    # 경합하면 Nav2 lifecycle 전환이 타임아웃나기도 한다.
+    headless_arg = DeclareLaunchArgument(
+        'headless', default_value='false',
+        description='true 면 gz GUI·RViz 없이 서버만 실행')
+    headless = LaunchConfiguration('headless')
+    gui_only = UnlessCondition(headless)
+
     return LaunchDescription([
 
         world_arg,
+        headless_arg,
 
-        # 1. 가제보 실행
+        # 1. 가제보 실행 (헤드리스면 -s 로 서버만)
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')
             ),
             launch_arguments={'gz_args': ['-r ', world_file]}.items(),
+            condition=UnlessCondition(headless),
+        ),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')
+            ),
+            launch_arguments={'gz_args': ['-r -s ', world_file]}.items(),
+            condition=IfCondition(headless),
         ),
 
         # 2. 로봇 상태 퍼블리셔 (use_sim_time 고정)
@@ -92,12 +111,13 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # 5. 알비즈 실행
+        # 5. 알비즈 실행 (헤드리스면 생략)
         Node(
             package='rviz2',
             executable='rviz2',
             arguments=['-d', rviz_config_file],
             parameters=[{'use_sim_time': True}],
-            output='screen'
+            output='screen',
+            condition=gui_only,
         )
     ])

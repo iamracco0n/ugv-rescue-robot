@@ -40,12 +40,20 @@ def generate_launch_description():
         'world', default_value='rescue_building',
         description='worlds/ 아래 SDF 이름 (rescue_building | rescue_building_large)')
 
+    # 화면 없이 돌릴지. 자동 채점(tools/run_eval.sh)에서 쓴다.
+    headless_arg = DeclareLaunchArgument(
+        'headless', default_value='false',
+        description='true 면 gz GUI·RViz 없이 서버만 실행')
+
     # 1. Gazebo + Robot + 브리지 + RViz (열화상 브리지 포함)
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_bringup, 'launch', 'gazebo.launch.py')
         ),
-        launch_arguments={'world': LaunchConfiguration('world')}.items()
+        launch_arguments={
+            'world': LaunchConfiguration('world'),
+            'headless': LaunchConfiguration('headless'),
+        }.items()
     )
 
     # 2. SLAM Toolbox (14초 후 — 로봇 스폰 8초 이후)
@@ -116,6 +124,7 @@ def generate_launch_description():
         patrol_arg,
         victims_arg,
         world_arg,
+        headless_arg,
         gazebo_launch,
         slam_launch,
         nav2_launch,
