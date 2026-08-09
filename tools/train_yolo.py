@@ -54,6 +54,10 @@ def main():
     ap.add_argument('--val-frac', type=float, default=0.2)
     ap.add_argument('--max-bg-ratio', type=float, default=2.0,
                     help='양성 1장당 배경 최대 장수')
+    ap.add_argument('--max-pos-ratio', type=float, default=4.0,
+                    help='배경 1장당 양성 최대 장수. 실측에서 양성이 배경보다 '
+                         '13배 많아(211:16) 유령 억제 학습이 묻혔다. '
+                         '유령을 막는 것이 목적이므로 양성 쪽도 제한한다')
     ap.add_argument('--seed', type=int, default=0)
     args = ap.parse_args()
 
@@ -69,12 +73,19 @@ def main():
 
     random.seed(args.seed)
     random.shuffle(bg)
+    random.shuffle(pos)
     keep_bg = bg[:int(len(pos) * args.max_bg_ratio)]
     if len(keep_bg) < len(bg):
         print(f'배경을 {len(bg)} → {len(keep_bg)}장으로 제한 '
               f'(양성 1장당 최대 {args.max_bg_ratio}장). '
               '배경이 과하면 검출이 지나치게 보수적으로 치우친다')
-    data = pos + keep_bg
+    # 반대로 양성이 압도적이면 유령 억제 학습이 묻힌다(실측 211:16).
+    keep_pos = pos[:max(1, int(len(keep_bg) * args.max_pos_ratio))]
+    if len(keep_pos) < len(pos):
+        print(f'양성을 {len(pos)} → {len(keep_pos)}장으로 제한 '
+              f'(배경 1장당 최대 {args.max_pos_ratio}장). '
+              '목적은 유령 억제이므로 배경이 묻히면 안 된다')
+    data = keep_pos + keep_bg
     random.shuffle(data)
 
     n_val = max(1, int(len(data) * args.val_frac))

@@ -51,11 +51,18 @@ class DatasetCapture(Node):
         self.declare_parameter('truth_json', '')
         self.declare_parameter('out_dir', os.path.expanduser('~/ugv_dataset'))
         self.declare_parameter('match_r', 1.5)      # 정답과 이 안이면 양성(m)
-        self.declare_parameter('min_gap_s', 0.4)    # 같은 장면 중복 저장 방지
+        # 저장 주기를 양성/유령으로 나눈다.
+        # 로봇은 진짜 조난자를 조사하는 데 시간을 많이 쓰므로 같은 주기로
+        # 저장하면 양성만 쌓인다(실측 211 : 16). 유령을 막으려면 '사람이
+        # 아니다' 를 가르칠 표본이 많아야 하는데 그게 부족해진다.
+        # 유령은 드물게 생기므로 촘촘히, 양성은 성기게 담는다.
+        self.declare_parameter('min_gap_pos_s', 1.0)
+        self.declare_parameter('min_gap_neg_s', 0.1)
         self.declare_parameter('cam_fov_rad', CAM_FOV_RAD)
 
         self.match_r = float(self.get_parameter('match_r').value)
-        self.min_gap = float(self.get_parameter('min_gap_s').value)
+        self.gap_pos = float(self.get_parameter('min_gap_pos_s').value)
+        self.gap_neg = float(self.get_parameter('min_gap_neg_s').value)
         self.cam_fov = float(self.get_parameter('cam_fov_rad').value)
 
         tj = self.get_parameter('truth_json').value
@@ -81,7 +88,8 @@ class DatasetCapture(Node):
         self._tf_listener = tf2_ros.TransformListener(self._tf_buf, self)
 
         self._frame = None
-        self._last_save = 0.0
+        self._last_pos = 0.0
+        self._last_neg = 0.0
         self.n_pos = self.n_neg = 0
 
         self.create_subscription(
@@ -116,8 +124,8 @@ class DatasetCapture(Node):
         if self._frame is None:
             return
         now = self.get_clock().now().nanoseconds * 1e-9
-        if now - self._last_save < self.min_gap:
-            return
+        # 주기 판단은 양성/유령을 가른 뒤에 한다(아래). 여기서 한 번에
+        # 걸러버리면 드문 유령이 양성에 밀려 저장되지 않는다.
         pose = self._robot_pose()
         if pose is None:
             return
@@ -132,6 +140,10 @@ class DatasetCapture(Node):
         near = min((math.hypot(gx - vx, gy - vy) for vx, vy in self.victims),
                    default=float('inf'))
         is_person = near <= self.match_r
+        gap = self.gap_pos if is_person else self.gap_neg
+        last = self._last_pos if is_person else self._last_neg
+        if now - last < gap:
+            return
 
         frame = self._frame
         h, w = frame.shape[:2]
@@ -154,7 +166,10 @@ class DatasetCapture(Node):
 
         with open(os.path.join(self.lbl_dir, f'{name}.txt'), 'w') as f:
             f.write('\n'.join(lines))
-        self._last_save = now
+        if is_person:
+            self._last_pos = now
+        else:
+            self._last_neg = now
 
     def _report(self):
         self.get_logger().info(
