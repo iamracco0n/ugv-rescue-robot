@@ -92,7 +92,7 @@ class YoloPoseNode(Node):
 
         triage_map = {
             1: ("L1:Critical", (0, 0, 255)),
-            2: ("L2:Urgent", (0, 165, 255)),
+            2: ("L2:NeedHelp", (0, 165, 255)),
             3: ("L3:Normal", (0, 255, 0))
         }
         label, color = triage_map.get(level, ("Unknown", (255, 255, 255)))
@@ -155,7 +155,7 @@ class YoloPoseNode(Node):
             
             triage_map = {
                 1: ("L1:Critical", (0, 0, 255)),
-                2: ("L2:Urgent", (0, 165, 255)),
+                2: ("L2:NeedHelp", (0, 165, 255)),
                 3: ("L3:Normal", (0, 255, 0))
             }
             final_label, final_color = triage_map.get(final_level, ("Unknown", (255, 255, 255)))
