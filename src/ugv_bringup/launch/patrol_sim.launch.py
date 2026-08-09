@@ -49,7 +49,7 @@ def generate_launch_description():
     # 탐사 성향 조절 — 파라미터 스윕으로 최적값을 찾기 위해 런치에서 연다.
     # 노드는 초기화 때 한 번만 읽으므로 런타임 param set 으로는 못 바꾼다.
     budget_arg = DeclareLaunchArgument(
-        'room_clear_budget_s', default_value='180.0',
+        'room_clear_budget_s', default_value='240.0',
         description='한 구역을 마무리하는 데 쓸 최대 시간(초). '
                     '크면 꼼꼼하고 느리다')
     radius_arg = DeclareLaunchArgument(
