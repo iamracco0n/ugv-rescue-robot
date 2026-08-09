@@ -33,10 +33,11 @@ cleanup() {
 trap cleanup EXIT
 
 # ── 정답 만들기 ───────────────────────────────────────────────────────
-GEN="$WS/src/ugv_bringup/worlds/gen_${WORLD#rescue_building_}.py"
-if [ "$WORLD" = rescue_building_large ]; then
-  GEN="$WS/src/ugv_bringup/worlds/gen_rescue_large.py"
-fi
+case "$WORLD" in
+  rescue_building_large) GEN="$WS/src/ugv_bringup/worlds/gen_rescue_large.py" ;;
+  ghost_bench)           GEN="$WS/src/ugv_bringup/worlds/gen_ghost_bench.py" ;;
+  *)                     GEN="" ;;
+esac
 if [ -f "$GEN" ]; then
   python3 "$GEN" --truth "$TRUTH" >/dev/null || { echo "정답 생성 실패"; exit 2; }
 else
