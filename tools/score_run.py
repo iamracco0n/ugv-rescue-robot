@@ -214,7 +214,16 @@ def main():
         a, b = flags['all_found']
         t = flags['t_all']
         when = f' — {t:.0f}초 만에' if t else ''
-        print(f'  전원 발견 보고: {a}/{b}명 ✅{when}')
+        if fps or missed:
+            # 보고는 등록 '수' 만 본다. 오탐이 수를 채우면 실제로는 못 찾은
+            # 조난자가 있는데도 임무 완료로 보고된다. 구조에서 제일 위험한
+            # 오류라 눈에 띄게 표시한다.
+            print(f'  전원 발견 보고: {a}/{b}명 ⚠ 잘못된 보고{when}')
+            print(f'     실제 발견 {len(errs)}명 · 오탐 {len(fps)}건 · '
+                  f'미발견 {len(missed)}명')
+            fails.append('오탐이 수를 채워 전원 발견이 잘못 보고됨')
+        else:
+            print(f'  전원 발견 보고: {a}/{b}명 ✅{when}')
     else:
         print('  전원 발견 보고: 없음 (시간 내 미달성)')
     print(f'  회차 완료 보고: {flags["sweep_done"]}회')
