@@ -3,7 +3,8 @@
 A.R.G.U.S. UGV 워크스페이스를 데스크탑에서 처음부터 세팅하는 절차입니다.
 원본은 Jetson Orin(aarch64)에서 개발됐고, 아래는 x86_64 데스크탑 기준입니다.
 
-Step 1부터 순서대로 실행하면 됩니다. 프로젝트 개요는 [README](../README.md),
+Step 1부터 순서대로 실행하면 됩니다. 프로젝트 개요는 [README](README.md),
+실행 방법은 [HOW_TO_RUN.md](HOW_TO_RUN.md),
 구조·알고리즘 상세는 [ARCHITECTURE.md](ARCHITECTURE.md)를 참고하세요.
 
 ---
