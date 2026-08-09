@@ -35,7 +35,13 @@ PITCH_SLEW_MAX   = 2.0                # pitch 최대 변화율 (rad/s²)
 CAM_FOV_RAD      = 1.089              # 기본값: 시뮬 카메라 수평 FOV (ugv.urdf.xacro)
                                       # 실기 D435i는 87° → 파라미터 cam_fov_rad로 지정
 
-MERGE_M          = 1.5    # 기발견 환자 중복 판정 반경 (m)
+MERGE_M          = 1.5    # 기발견 환자 중복 판정 기본 반경 (m)
+# 위치 오차는 관측 거리에 비례한다(실측: 2.2m 관측 → 오차 0.22m,
+# 4.8m 관측 → 오차 1.5m). 반경을 1.5m 로 고정하면 멀리서 잡은 등록과
+# 가까이서 잡은 등록이 1.64m 벌어져 같은 사람이 둘로 등록됐다.
+# 이건 단순 중복이 아니라, 실종자 수를 채운 것처럼 보이게 해 수색을
+# 조기 종료시킬 수 있다.
+MERGE_PER_M      = 0.25   # 관측 거리 1m 당 늘려줄 반경 (m)
 IGNORE_R         = 0.5    # 확인 완료 환자 억제 반경 (m)
 MSG_FRESHNESS_S  = 1.0    # YOLO 신선도 한계 (s)
 CONFIRM_N        = 3      # 연속 탐지 횟수 — 오탐 방지
@@ -243,11 +249,17 @@ class TargetManager(Node):
 
     # ── 유틸 ──────────────────────────────────────────────────────────
 
-    def _is_known(self, gx, gy) -> bool:
-        for px, py, _, _ in self.confirmed.values():
-            if math.hypot(gx - px, gy - py) < MERGE_M:
-                return True
-        return False
+    def _match_known(self, gx, gy, dist):
+        """같은 사람으로 볼 기존 등록의 pid. 없으면 None.
+
+        중복 반경은 두 관측의 거리에 비례해 넓힌다. 멀리서 잡은 등록일수록
+        참값에서 벗어나 있으므로 고정 반경으로는 같은 사람을 못 묶는다.
+        """
+        for pid, (px, py, _, _, pdist) in self.confirmed.items():
+            r = MERGE_M + MERGE_PER_M * (pdist + dist) / 2.0
+            if math.hypot(gx - px, gy - py) < r:
+                return pid
+        return None
 
     def _is_ignored(self, gx, gy) -> bool:
         for ix, iy in self.ignored_targets:
@@ -337,7 +349,13 @@ class TargetManager(Node):
                 and self._detect_streak >= INSPECT_TRIGGER_N
                 and self.last_msg is not None):
             gx, gy = self._estimate_xy(self.last_msg)
-            if self._is_known(gx, gy) or self._is_ignored(gx, gy):
+            # 이미 아는 사람이어도, 훨씬 가까이서 다시 보게 됐다면 확인을
+            # 진행해 좌표를 정밀화한다(멀리서 먼저 잡힌 등록을 고쳐 쓴다).
+            known = self._match_known(gx, gy, self.last_msg.distance)
+            if known is not None:
+                if self.last_msg.distance >= self.confirmed[known][4] - 0.3:
+                    return
+            elif self._is_ignored(gx, gy):
                 return
             self._inspect_active     = True
             self._inspect_start_t    = now_sec
@@ -457,14 +475,26 @@ class TargetManager(Node):
         if gx is None or gy is None:
             gx, gy = self._estimate_xy(msg)
 
-        if self._is_known(gx, gy) or self._is_ignored(gx, gy):
+        known = self._match_known(gx, gy, msg.distance)
+        if known is not None:
+            # 이미 등록된 사람이다. 다만 이번이 더 가까운 관측이면 위치가
+            # 더 정확하므로 갱신한다(멀리서 먼저 잡힌 좌표를 고쳐 쓴다).
+            px, py, plv, plbl, pdist = self.confirmed[known]
+            if msg.distance < pdist - 0.3:
+                self.confirmed[known] = (gx, gy, plv, plbl, msg.distance)
+                self.republish_markers()
+                self.get_logger().info(
+                    f'#{known} 위치 갱신 ({px:.1f},{py:.1f}) → ({gx:.1f},{gy:.1f}) '
+                    f'— 더 가까이서 재관측 {pdist:.1f}m → {msg.distance:.1f}m')
+            return
+        if self._is_ignored(gx, gy):
             return
 
         pid  = self.pid_count; self.pid_count += 1
         lv   = msg.triage_level
         lbl  = msg.triage_label
         room = get_room_name(gx, gy)
-        self.confirmed[pid]  = (gx, gy, lv, lbl)
+        self.confirmed[pid]  = (gx, gy, lv, lbl, msg.distance)
         self.ignored_targets.append((gx, gy))
         self.republish_markers()
 
@@ -522,7 +552,7 @@ class TargetManager(Node):
         if not self.confirmed:
             return
         ma = MarkerArray()
-        for pid, (x, y, lv, lbl) in self.confirmed.items():
+        for pid, (x, y, lv, lbl, _) in self.confirmed.items():
             ma.markers.append(self._mk_sphere(pid, x, y, lv))
             ma.markers.append(self._mk_ring(pid, x, y, lv))
             ma.markers.append(self._mk_text(pid, x, y, lv, lbl))
