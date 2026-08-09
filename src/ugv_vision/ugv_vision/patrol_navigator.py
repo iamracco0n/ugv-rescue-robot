@@ -50,6 +50,29 @@ IDLE, PATROL, MANUAL, FIRE_ALARM = 'IDLE', 'PATROL', 'MANUAL', 'FIRE_ALARM'
 INSPECT = 'INSPECT'      # 조난자 후보 확인 — 정지 후 포탑 조준
 ESCAPE  = 'ESCAPE'       # 장애물 안에 박힘 — 후진으로 탈출
 
+def sweep_decision(fr_cells, unseen, unseen_budget, done_frontier_cells,
+                   goals_done, min_goals, free_area, min_area,
+                   victims, expected):
+    """수색을 끝낼지·재수색할지·계속할지 정하는 순수 함수.
+
+    노드 상태에 얽혀 있으면 시뮬을 70분씩 돌려야 확인할 수 있다.
+    실제로 '회차 완료' 와 '재수색' 두 경로는 커버리지 완료 조건 뒤에
+    묶여 있어서, 시간 안에 커버리지가 안 끝나면 둘 다 검증할 수 없었다.
+    규칙만 떼어내면 단위 테스트로 확인할 수 있다.
+
+    반환: 'done' | 'resweep' | 'continue'
+      done    — 전 구역을 훑었고 인원도 다 찾았다
+      resweep — 다 훑었는데 인원이 모자란다 → 놓친 곳이 있다
+      continue— 아직 볼 곳이 남았다
+    """
+    covered = (fr_cells <= done_frontier_cells and unseen <= unseen_budget)
+    explored_enough = (goals_done >= min_goals and free_area >= min_area)
+    all_found = (expected <= 0 or victims >= expected)
+    if covered and explored_enough:
+        return 'done' if all_found else 'resweep'
+    return 'continue'
+
+
 # 자기 goal 에코 판별: 같은 좌표가 짧은 시간 안에 되돌아오면 내 것
 GOAL_ECHO_TOL    = 0.05   # m
 GOAL_ECHO_WINDOW = 5.0    # s
@@ -1248,8 +1271,6 @@ class PatrolNavigator(Node):
             fr_cells, unseen = self._coverage_left()
             unseen_budget = max(self.done_unseen_area,
                                 self._known_free_area() * self.done_unseen_frac)
-            covered = (fr_cells <= self.done_frontier_cells
-                       and unseen <= unseen_budget)
             phase = ('보충 수색(전원 발견 완료)' if self._all_found_reported
                      else '수색 진행')
             self.get_logger().info(
@@ -1258,13 +1279,14 @@ class PatrolNavigator(Node):
                 f'{unseen_budget:.1f}), 조난자 {len(self._victims)}'
                 + (f'/{self.expected_victims}' if self.expected_victims > 0 else '')
                 + '명', throttle_duration_sec=60.0)
-            explored_enough = (self._goals_done >= self.min_goals_for_sweep
-                               and self._known_free_area() >= self.min_area_for_sweep)
-            # 실종자 수를 아는 경우, 다 찾기 전에는 완료로 보지 않는다.
-            all_found = (self.expected_victims <= 0
-                         or len(self._victims) >= self.expected_victims)
+            # 판정 규칙은 순수 함수로 분리해 단위 테스트한다(sweep_decision).
+            decision = sweep_decision(
+                fr_cells, unseen, unseen_budget, self.done_frontier_cells,
+                self._goals_done, self.min_goals_for_sweep,
+                self._known_free_area(), self.min_area_for_sweep,
+                len(self._victims), self.expected_victims)
 
-            if covered and explored_enough and all_found:
+            if decision == 'done':
                 if not self._explore_done:
                     self._explore_done = True
                     self._sweeps += 1
@@ -1273,7 +1295,7 @@ class PatrolNavigator(Node):
                 self._frontier_goal = None
                 return
 
-            if covered and explored_enough and not all_found:
+            if decision == 'resweep':
                 # 다 훑었는데 인원이 모자란다 = 놓친 것이다. 시야 기록을 지우고
                 # 처음부터 다시 훑는다.
                 self._sweeps += 1
