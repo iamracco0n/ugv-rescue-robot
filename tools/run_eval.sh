@@ -49,7 +49,18 @@ else
 fi
 
 # ── 실행 ──────────────────────────────────────────────────────────────
+# 한 머신에서 여러 개를 동시에 돌릴 때는 반드시 분리해야 한다.
+#   ROS_DOMAIN_ID  — ROS 토픽 격리
+#   GZ_PARTITION   — Gazebo transport 격리 (스폰 서비스가 여기 붙는다)
+# 이걸 안 하면 로봇 스폰 요청이 다른 월드로 가서 타임아웃난다
+#   [ros_gz_sim] Request to create entity ... timed out
+# START_DELAY 로 기동 시차를 주면 스폰 경합도 줄어든다.
+if [ -n "${START_DELAY:-}" ]; then
+  echo "기동 지연 ${START_DELAY}초 대기(동시 실행 시 스폰 경합 방지)"
+  sleep "$START_DELAY"
+fi
 echo "월드=$WORLD 실종자=$VICTIMS 시간=${DURATION}초  로그=$LOG"
+echo "  예산=${BUDGET:-180.0}초 반경=${RADIUS:-5.0}m 도메인=${ROS_DOMAIN_ID:-0} 파티션=${GZ_PARTITION:-기본}"
 source /opt/ros/humble/setup.bash
 source "$WS/install/setup.bash"
 export GZ_SIM_RESOURCE_PATH="$WS/install/ugv_description/share:${GZ_SIM_RESOURCE_PATH:-}"

@@ -5,6 +5,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Time
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -126,8 +127,16 @@ def generate_launch_description():
                      'use_sim_time': True,
                      'patrol_enabled_on_boot': LaunchConfiguration('patrol_enabled_on_boot'),
                      'expected_victims': LaunchConfiguration('expected_victims'),
-                     'room_clear_budget_s': LaunchConfiguration('room_clear_budget_s'),
-                     'sweep_first_radius': LaunchConfiguration('sweep_first_radius'),
+                     # 실수형으로 강제한다. 런치 인자는 문자열이라 '90' 을
+                     # 넘기면 rclpy 가 INTEGER 로 추론해 DOUBLE 파라미터와
+                     # 타입이 안 맞고, 노드가 기동 즉시 죽는다
+                     # (InvalidParameterTypeException).
+                     'room_clear_budget_s': ParameterValue(
+                         LaunchConfiguration('room_clear_budget_s'),
+                         value_type=float),
+                     'sweep_first_radius': ParameterValue(
+                         LaunchConfiguration('sweep_first_radius'),
+                         value_type=float),
                  }], output='screen'),
         ]
     )
