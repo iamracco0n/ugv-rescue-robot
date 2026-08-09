@@ -239,6 +239,7 @@ class PatrolNavigator(Node):
         self._explore_done = False
         self._sweeps = 0                      # 건물 전체를 훑은 횟수
         self._victims: dict[int, tuple] = {}  # 확정 조난자 {pid: (x, y, label)}
+        self._all_found_reported = False      # '전원 발견' 보고를 이미 냈는지
         self._fires_seen: list[tuple] = []    # 확정 화재 [(x, y)]
 
         # 시야 커버리지 — SLAM 맵과 같은 격자에 정렬해서 유지한다
@@ -513,6 +514,10 @@ class PatrolNavigator(Node):
             pid = m.id // 3
             self._victims[pid] = (m.pose.position.x, m.pose.position.y,
                                   m.text.split('\n')[0] if m.text else '')
+        # 실종자 수를 채운 순간 바로 보고한다(커버리지를 기다리지 않는다)
+        if (self.expected_victims > 0
+                and len(self._victims) >= self.expected_victims):
+            self._report_all_found()
 
     def fire_seen_cb(self, msg: PointStamped):
         fx, fy = msg.point.x, msg.point.y
@@ -705,6 +710,35 @@ class PatrolNavigator(Node):
             if best is not None and delta > math.pi / 2:
                 break            # 충분히 돌아봤고 답이 있으면 멈춘다
         return best
+
+    def _report_all_found(self):
+        """실종자 수를 다 채운 순간 곧바로 보고한다(커버리지와 무관).
+
+        커버리지까지 끝나야 보고하면, 전원을 찾고도 한참을 말없이 돌아
+        운용자는 로봇이 왜 계속 도는지 알 수 없다. 실제로 7명을 다 찾은 뒤
+        미관측 279m² 를 메우느라 계속 순찰했다.
+        구조 판단에 필요한 정보는 '몇 명을 어디서 찾았나' 이므로 그 시점에
+        바로 내보내고, 남은 구역은 '보충 수색' 으로 이어간다(명단에 없는
+        조난자가 있을 수 있어 수색 자체는 멈추지 않는다).
+        """
+        if self._all_found_reported:
+            return
+        self._all_found_reported = True
+        vics = sorted(self._victims.items())
+        by_lvl: dict[str, int] = {}
+        for _, (_, _, lbl) in vics:
+            by_lvl[lbl] = by_lvl.get(lbl, 0) + 1
+        _, unseen = self._coverage_left()
+        lines = [f'🏁 전원 발견! 조난자 {len(vics)}/{self.expected_victims}명 '
+                 '확인 — 구조 대기',
+                 '  ' + ' / '.join(f'{k} {v}명' for k, v in sorted(by_lvl.items())),
+                 f'  화재 {len(self._fires_seen)}건']
+        for pid, (x, y, lbl) in vics:
+            lines.append(f'   · #{pid} {lbl} ({x:.1f}, {y:.1f})')
+        lines.append(f'  (미관측 {unseen:.0f}m² 남음 — 보충 수색 계속)')
+        self.get_logger().info('\n'.join(lines))
+        m = Bool(); m.data = True
+        self.sweep_pub.publish(m)
 
     def _report_mission(self, sweep_n: int):
         """건물을 한 바퀴 다 훑을 때마다 수색 결과를 요약 보고한다.
@@ -1130,8 +1164,10 @@ class PatrolNavigator(Node):
                                 self._known_free_area() * self.done_unseen_frac)
             covered = (fr_cells <= self.done_frontier_cells
                        and unseen <= unseen_budget)
+            phase = ('보충 수색(전원 발견 완료)' if self._all_found_reported
+                     else '수색 진행')
             self.get_logger().info(
-                f'수색 진행 — 미탐사 경계 {fr_cells}셀(완료 기준 '
+                f'{phase} — 미탐사 경계 {fr_cells}셀(완료 기준 '
                 f'{self.done_frontier_cells}), 미관측 {unseen:.1f}m²(기준 '
                 f'{unseen_budget:.1f}), 조난자 {len(self._victims)}'
                 + (f'/{self.expected_victims}' if self.expected_victims > 0 else '')
