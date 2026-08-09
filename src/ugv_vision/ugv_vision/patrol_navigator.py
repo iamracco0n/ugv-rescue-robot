@@ -137,9 +137,14 @@ class PatrolNavigator(Node):
         self.declare_parameter('visual_min_size', 300)      # 셀 수(0.75m^2)
         # 이 반경 안에 안 본 구역이 있으면, 멀리 있는 미탐사 경계보다 먼저 훑는다
         self.declare_parameter('sweep_first_radius', 5.0)
-        # 다만 연속으로 이만큼 주변만 훑으면, 한 번은 미탐사 경계로 나가서
-        # 수색 범위를 넓힌다. 방 하나에 갇히는 것을 막는다.
-        self.declare_parameter('sweep_first_max_streak', 3)
+        # 방 안 마무리용 군집 하한(셀). 전역 후보(visual_min_size)보다 작게
+        # 잡아 구석의 작은 사각지대까지 목표로 삼는다. 이 값이 크면 계획기가
+        # 못 잡는 조각이 남아 완료 판정이 영원히 안 선다.
+        self.declare_parameter('visual_min_local', 40)      # 셀 수(0.1m^2)
+        # 한 구역을 마무리하는 데 쓸 수 있는 최대 시간(초).
+        # 예전의 '연속 3회 제한' 을 대체한다. 횟수로 끊으면 방을 다 봤는지와
+        # 무관하게 나가버려, 남은 조각을 지우러 다시 오느라 재수색이 길어졌다.
+        self.declare_parameter('room_clear_budget_s', 180.0)
         # 사각지대(벽 모서리·장애물 뒤)는 여유가 안 나오므로 낮게 잡는다
         self.declare_parameter('visual_clearance', 0.45)
         # 목표 도착 후 그 자리에서 포탑이 훑을 시간(초). 바로 다음 목표로
@@ -196,7 +201,8 @@ class PatrolNavigator(Node):
         self.cam_fov           = float(self.get_parameter('cam_fov_rad').value)
         self.visual_min        = int(self.get_parameter('visual_min_size').value)
         self.sweep_first_r     = float(self.get_parameter('sweep_first_radius').value)
-        self.sweep_max_streak  = int(self.get_parameter('sweep_first_max_streak').value)
+        self.visual_min_local  = int(self.get_parameter('visual_min_local').value)
+        self.room_clear_budget = float(self.get_parameter('room_clear_budget_s').value)
         self.visual_clearance  = float(self.get_parameter('visual_clearance').value)
         self.dwell_s           = float(self.get_parameter('arrive_dwell_s').value)
         self.min_goals_for_sweep = int(self.get_parameter('min_goals_for_sweep').value)
@@ -233,7 +239,8 @@ class PatrolNavigator(Node):
         self._frontier_src = None             # 그 goal 을 만든 프론티어 중심 (중복 판정용)
         self._frontier_t = 0.0                # 마지막 목표 선정 시각
         self._dwell_until = None              # 도착 후 훑기 종료 시각
-        self._local_streak = 0                # 연속 '주변 미관측' 목표 수
+        self._local_anchor = None             # 현재 마무리 중인 구역의 기준점
+        self._local_since = 0.0               # 그 구역에 들어온 시각(초)
         self._goals_done = 0                  # 실제로 도달한 목표 수
         self._visited_frontiers: list[tuple] = []
         self._explore_done = False
@@ -518,11 +525,20 @@ class PatrolNavigator(Node):
         free = int(((arr >= 0) & (arr < 25)).sum())
         return free * g.info.resolution ** 2
 
-    def _find_visual_frontiers(self):
+    def _find_visual_frontiers(self, min_size=None):
         """자유공간인데 카메라로 아직 안 본 구역의 군집 중심.
 
         라이다 프론티어가 다 없어져도(=매핑 완료) 여기 남아 있으면
         아직 수색이 끝난 게 아니다. 방을 실제로 들여다보게 만드는 핵심.
+
+        min_size 로 군집 크기 하한을 바꿀 수 있다. 방 안을 마무리할 때는
+        작은 조각까지 봐야 하고(작은 값), 멀리 나갈 곳을 고를 때는 조각을
+        무시해야 한다(큰 값).
+
+        이 하한과 완료 판정(_coverage_left)의 셈이 어긋나면 안 된다.
+        하한을 300셀(0.75m^2)로 두면 그보다 작은 조각은 계획기가 아예
+        후보로 잡지 않는데 완료 판정은 그 면적을 계속 센다. 로봇이 절대
+        못 지우는 바닥이 생겨 미관측이 300~400m^2 에서 멈춘다(실측 3회).
         """
         g = self._map_msg
         if g is None or self._seen is None:
@@ -538,7 +554,8 @@ class PatrolNavigator(Node):
         if n == 0:
             return []
         sizes = np.bincount(lbl.ravel())
-        idx = [i for i in range(1, n + 1) if sizes[i] >= self.visual_min]
+        lo = self.visual_min if min_size is None else min_size
+        idx = [i for i in range(1, n + 1) if sizes[i] >= lo]
         if not idx:
             return []
         cents = ndimage.center_of_mass(target, lbl, idx)
@@ -873,20 +890,42 @@ class PatrolNavigator(Node):
         # 여러 개인 건물에서는 라이다 프론티어가 계속 남아 있어서 로봇이
         # 들어간 방의 사각지대를 안 보고 다음 방으로 떠나버린다.
         # → 반경 sweep_first_r 안에 안 본 구역이 있으면 그것부터 처리한다.
-        visual = self._find_visual_frontiers()
-        near = [c for c in visual
+        # 방 안을 마무리할 때는 작은 조각까지 목표로 삼는다.
+        near = [c for c in self._find_visual_frontiers(self.visual_min_local)
                 if math.hypot(c[0] - rx, c[1] - ry) <= self.sweep_first_r]
-        # 연속으로 주변만 훑으면 한 번은 밖으로 나간다. 안 그러면 방 하나에
-        # 갇혀 수색 범위가 안 넓어진다.
-        if near and self._local_streak < self.sweep_max_streak:
-            cands, kind = near, '주변 미관측(우선)'
-            self._local_streak += 1
+        now = self._now()
+
+        # '들어간 방은 다 보고 나간다'.
+        # 예전에는 연속 3회만 주변을 훑고 무조건 밖으로 나갔다. 그래서 방을
+        # 다 못 본 채 떠나고, 남은 조각을 지우러 나중에 다시 오느라 재수색이
+        # 길어졌다. 이제는 주변에 안 본 곳이 있으면 계속 훑는다.
+        # 다만 한 구역에 영원히 갇히면 안 되므로 시간 예산을 둔다
+        # (예전 3회 제한은 이 목적이었으나, 방을 다 봤는지와 무관해서
+        #  '덜 보고 나가는' 부작용이 컸다).
+        if near:
+            anchor_far = (self._local_anchor is None
+                          or math.hypot(rx - self._local_anchor[0],
+                                        ry - self._local_anchor[1])
+                          > self.sweep_first_r * 1.5)
+            if anchor_far:                      # 새 구역에 들어왔다
+                self._local_anchor = (rx, ry)
+                self._local_since = now
+            if now - self._local_since <= self.room_clear_budget:
+                cands, kind = near, '방 안 미관측(마무리)'
+            else:                               # 예산 초과 → 일단 나갔다 온다
+                self._local_anchor = None
+                cands = self._find_frontiers()
+                kind = '미탐사 경계(구역 예산 초과)'
+                if not cands:
+                    cands = self._find_visual_frontiers()
+                    kind = '미관측 구역'
         else:
-            self._local_streak = 0
+            self._local_anchor = None
             cands = self._find_frontiers()
             kind = '미탐사 경계'
             if not cands:
-                cands, kind = visual, '미관측 구역'
+                cands = self._find_visual_frontiers()
+                kind = '미관측 구역'
         self._last_goal_kind = kind
 
         best, best_score = None, -1e9

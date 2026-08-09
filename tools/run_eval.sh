@@ -70,6 +70,12 @@ while [ "$elapsed" -lt "$DURATION" ]; do
   if grep -q '회차 완료' "$LOG" 2>/dev/null; then
     echo "회차 완료 감지 — 조기 종료(${elapsed}초)"; break
   fi
+  # 임무의 1차 목표는 전원 발견이다. 그 뒤 보충 수색까지 기다리면
+  # 검증 한 번에 한 시간씩 드니, 여기서 끊고 '전원 발견까지 걸린 시간'
+  # 을 성능 지표로 쓴다.
+  if [ "${STOP_ON_ALL_FOUND:-1}" = 1 ] && grep -q '전원 발견' "$LOG" 2>/dev/null; then
+    echo "전원 발견 감지 — 조기 종료(${elapsed}초)"; break
+  fi
 done
 
 cleanup

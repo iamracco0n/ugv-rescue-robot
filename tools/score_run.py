@@ -31,6 +31,8 @@ RE_UPD = re.compile(r'#(\d+) 위치 갱신 \([-\d.]+,[-\d.]+\) → \(([-\d.]+),(
 RE_FIRE = re.compile(r'화재 발견!\s*map \(([-\d.]+),\s*([-\d.]+)\)')
 
 RE_ALLFOUND = re.compile(r'전원 발견!\s*조난자 (\d+)/(\d+)명')
+# ROS 로그 앞머리의 절대 시각 — 소요 시간 계산용
+RE_STAMP = re.compile(r'\[(\d{10}\.\d+)\]')
 RE_SWEEP_DONE = re.compile(r'수색 (\d+)회차 완료')
 RE_RESWEEP = re.compile(r'(\d+)회차 재수색 시작')
 
@@ -56,12 +58,19 @@ def parse(path):
     """로그에서 최종 등록 목록·화재·주요 카운터를 뽑는다."""
     regs, fires = {}, []
     counts = {k: 0 for k in COUNTERS}
-    flags = {'all_found': None, 'sweep_done': 0, 'resweep': 0}
+    flags = {'all_found': None, 'sweep_done': 0, 'resweep': 0,
+             't0': None, 't_end': None, 't_all': None, 't_first': None}
     pats = {k: re.compile(v) for k, v in COUNTERS.items()}
 
     with open(path, encoding='utf-8', errors='replace') as f:
         for raw in f:
             line = strip_ansi(raw)
+            ms = RE_STAMP.search(line)
+            if ms:
+                t = float(ms.group(1))
+                if flags['t0'] is None:
+                    flags['t0'] = t
+                flags['t_end'] = t
             m = RE_REG.search(line)
             if m:
                 pid = int(m.group(1))
@@ -83,6 +92,8 @@ def parse(path):
             m = RE_ALLFOUND.search(line)
             if m:
                 flags['all_found'] = (int(m.group(1)), int(m.group(2)))
+                if flags['t_all'] is None and flags['t0'] is not None:
+                    flags['t_all'] = flags['t_end'] - flags['t0']
             if RE_SWEEP_DONE.search(line):
                 flags['sweep_done'] += 1
             if RE_RESWEEP.search(line):
@@ -197,11 +208,15 @@ def main():
 
     # ── 임무 보고 ─────────────────────────────────────────────────────
     print('\n[임무 보고]')
+    if flags['t0'] is not None and flags['t_end'] is not None:
+        print(f'  런 길이: {flags["t_end"] - flags["t0"]:.0f}초')
     if flags['all_found']:
         a, b = flags['all_found']
-        print(f'  전원 발견 보고: {a}/{b}명 ✅')
+        t = flags['t_all']
+        when = f' — {t:.0f}초 만에' if t else ''
+        print(f'  전원 발견 보고: {a}/{b}명 ✅{when}')
     else:
-        print('  전원 발견 보고: 없음')
+        print('  전원 발견 보고: 없음 (시간 내 미달성)')
     print(f'  회차 완료 보고: {flags["sweep_done"]}회')
     print(f'  재수색 시작:    {flags["resweep"]}회')
 
