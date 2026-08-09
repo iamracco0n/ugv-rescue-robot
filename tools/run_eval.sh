@@ -60,7 +60,7 @@ if [ -n "${START_DELAY:-}" ]; then
   sleep "$START_DELAY"
 fi
 echo "월드=$WORLD 실종자=$VICTIMS 시간=${DURATION}초  로그=$LOG"
-echo "  예산=${BUDGET:-240.0}초 반경=${RADIUS:-5.0}m 도메인=${ROS_DOMAIN_ID:-0} 파티션=${GZ_PARTITION:-기본}"
+echo "  예산=${BUDGET:-240.0}초 반경=${RADIUS:-5.0}m 도메인=${ROS_DOMAIN_ID:-0} 파티션=${GZ_PARTITION:-기본} 검출필터=${FILTER:-없음}"
 source /opt/ros/humble/setup.bash
 source "$WS/install/setup.bash"
 export GZ_SIM_RESOURCE_PATH="$WS/install/ugv_description/share:${GZ_SIM_RESOURCE_PATH:-}"
@@ -71,6 +71,7 @@ setsid ros2 launch ugv_bringup patrol_sim.launch.py \
      world:="$WORLD" expected_victims:="$VICTIMS" headless:=true \
      room_clear_budget_s:="${BUDGET:-240.0}" \
      sweep_first_radius:="${RADIUS:-5.0}" \
+     filter_model:="${FILTER:-}" \
      > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 
