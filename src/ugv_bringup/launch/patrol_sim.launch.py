@@ -21,21 +21,36 @@ def generate_launch_description():
         description='스폰 후 즉시 순찰 시작 여부'
     )
 
+    # 구조본부가 알려준 실종자 수. 이 수를 다 찾기 전에는 수색을 끝내지 않고
+    # 시야 기록을 지워 재수색한다. 0이면 모름(면적 기준으로만 완료 판정).
+    #   rescue_building        조난자 3명
+    #   rescue_building_large  조난자 7명
+    victims_arg = DeclareLaunchArgument(
+        'expected_victims', default_value='0',
+        description='실종자 수 (0=모름). 예: world:=rescue_building_large 면 7')
+
     pkg_bringup = get_package_share_directory('ugv_bringup')
     pkg_navigation = get_package_share_directory('ugv_navigation')
     pkg_nav2_bringup = get_package_share_directory('nav2_bringup')
     pkg_slam_toolbox = get_package_share_directory('slam_toolbox')
 
+    # 월드 선택을 gazebo.launch.py 로 그대로 넘긴다
+    #   ros2 launch ugv_bringup patrol_sim.launch.py world:=rescue_building_large
+    world_arg = DeclareLaunchArgument(
+        'world', default_value='rescue_building',
+        description='worlds/ 아래 SDF 이름 (rescue_building | rescue_building_large)')
+
     # 1. Gazebo + Robot + 브리지 + RViz (열화상 브리지 포함)
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_bringup, 'launch', 'gazebo.launch.py')
-        )
+        ),
+        launch_arguments={'world': LaunchConfiguration('world')}.items()
     )
 
-    # 2. SLAM Toolbox (4초 후)
+    # 2. SLAM Toolbox (14초 후 — 로봇 스폰 8초 이후)
     slam_launch = TimerAction(
-        period=4.0,
+        period=14.0,
         actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -46,10 +61,10 @@ def generate_launch_description():
         ]
     )
 
-    # 3. Nav2 (8초 후) — fire_cloud 장애물 소스 포함된 nav2_params.yaml
+    # 3. Nav2 (22초 후 — 무거운 월드에서 lifecycle 타임아웃 방지) — fire_cloud 장애물 소스 포함된 nav2_params.yaml
     nav2_params_file = os.path.join(pkg_navigation, 'config', 'nav2_params.yaml')
     nav2_launch = TimerAction(
-        period=8.0,
+        period=22.0,
         actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -64,9 +79,12 @@ def generate_launch_description():
         ]
     )
 
-    # 4. 비전(YOLO 환자 감지 + 포탑 제어) (10초 후)
+    # 4. 비전(YOLO 환자 감지 + 포탑 제어) (48초 후)
+    #    Nav2 lifecycle 활성화가 끝난 뒤에 띄운다. 예전엔 26초(=Nav2 기동 4초 뒤)라
+    #    torch/CUDA 로딩 CPU 스파이크가 lifecycle 전환 도중에 겹쳐서
+    #    controller_server change_state 타임아웃 → 스택이 unconfigured 로 죽었다.
     vision_launch = TimerAction(
-        period=10.0,
+        period=48.0,
         actions=[
             Node(package='ugv_vision', executable='yolo_pose_node',
                  name='yolo_pose_node',
@@ -77,9 +95,9 @@ def generate_launch_description():
         ]
     )
 
-    # 5. 화재 감지 + 순찰 (12초 후 — Nav2 활성화 후)
+    # 5. 화재 감지 + 순찰 (58초 후 — Nav2 활성화 + 비전 로딩 후)
     patrol_launch = TimerAction(
-        period=12.0,
+        period=58.0,
         actions=[
             Node(package='ugv_vision', executable='fire_detection_node',
                  name='fire_detection_node',
@@ -89,12 +107,15 @@ def generate_launch_description():
                  parameters=[{
                      'use_sim_time': True,
                      'patrol_enabled_on_boot': LaunchConfiguration('patrol_enabled_on_boot'),
+                     'expected_victims': LaunchConfiguration('expected_victims'),
                  }], output='screen'),
         ]
     )
 
     return LaunchDescription([
         patrol_arg,
+        victims_arg,
+        world_arg,
         gazebo_launch,
         slam_launch,
         nav2_launch,

@@ -1,31 +1,43 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
+                            TimerAction)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.substitutions import Command
+from launch.substitutions import (Command, LaunchConfiguration,
+                                  PathJoinSubstitution, TextSubstitution)
 from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
 
     pkg_desc = get_package_share_directory('ugv_description')
-    pkg_bringup = get_package_share_directory('ugv_bringup') 
+    pkg_bringup = get_package_share_directory('ugv_bringup')
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
-    
+
     xacro_file = os.path.join(pkg_desc, 'urdf', 'ugv.urdf.xacro')
     rviz_config_file = os.path.join(pkg_desc, 'rviz', 'ugv.rviz')
-    
-    world_file = os.path.join(pkg_bringup, 'worlds', 'rescue_building.sdf')
+
+    # 월드 선택. SDF 파일명과 world 이름이 같아야 한다(스폰 시 -world 로 씀).
+    #   rescue_building       — 28x20m, 방 4개. 빠른 회귀 검증용(수색 약 9분)
+    #   rescue_building_large — 56x40m, 방 10개. 본 검증용(수색 약 35분)
+    world_arg = DeclareLaunchArgument(
+        'world', default_value='rescue_building',
+        description='worlds/ 아래 SDF 이름 (확장자 제외)')
+    world = LaunchConfiguration('world')
+    world_file = PathJoinSubstitution(
+        [pkg_bringup, 'worlds', [world, TextSubstitution(text='.sdf')]])
 
     return LaunchDescription([
+
+        world_arg,
 
         # 1. 가제보 실행
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')
             ),
-            launch_arguments={'gz_args': f'-r {world_file}'}.items(),
+            launch_arguments={'gz_args': ['-r ', world_file]}.items(),
         ),
 
         # 2. 로봇 상태 퍼블리셔 (use_sim_time 고정)
@@ -41,12 +53,14 @@ def generate_launch_description():
 
         # 3. 로봇 스폰
         TimerAction(
-            period=3.0, 
+            # 큰 월드(모델 50개 이상 + Fuel 메시)는 로딩이 길어, 3초에 스폰하면
+            # /world/<name>/create 서비스가 아직 안 떠서 로봇이 안 생긴다.
+            period=8.0, 
             actions=[
                 Node(
                     package='ros_gz_sim',
                     executable='create',
-                    arguments=['-world', 'rescue_building', '-topic', 'robot_description', '-name', 'ugv', '-x', '0.0', '-y', '0.0', '-z', '0.15'],
+                    arguments=['-world', world, '-topic', 'robot_description', '-name', 'ugv', '-x', '0.0', '-y', '0.0', '-z', '0.15'],
                     output='screen'
                 )
             ]

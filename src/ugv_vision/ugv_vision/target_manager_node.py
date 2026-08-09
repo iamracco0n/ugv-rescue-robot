@@ -35,7 +35,22 @@ PITCH_SLEW_MAX   = 2.0                # pitch 최대 변화율 (rad/s²)
 CAM_FOV_RAD      = 1.089              # 기본값: 시뮬 카메라 수평 FOV (ugv.urdf.xacro)
                                       # 실기 D435i는 87° → 파라미터 cam_fov_rad로 지정
 
-MERGE_M          = 1.5    # 기발견 환자 중복 판정 반경 (m)
+MERGE_M          = 1.5    # 기발견 환자 중복 판정 기본 반경 (m)
+# 위치 오차는 관측 거리에 비례한다(실측: 2.2m 관측 → 오차 0.22m,
+# 4.8m 관측 → 오차 1.5m). 반경을 1.5m 로 고정하면 멀리서 잡은 등록과
+# 가까이서 잡은 등록이 1.64m 벌어져 같은 사람이 둘로 등록됐다.
+# 이건 단순 중복이 아니라, 실종자 수를 채운 것처럼 보이게 해 수색을
+# 조기 종료시킬 수 있다.
+# 반경은 '두 관측 중 더 부정확한 쪽'(먼 쪽)으로 정한다. 평균을 쓰면
+# 역설이 생긴다 — 가까이서 재관측해 좌표를 정밀화할수록 저장된 거리가
+# 작아져 반경이 줄고, 나중의 먼 관측을 못 묶어 같은 사람이 새로 등록된다.
+# 실측: #3 을 1.3m 로 정밀화한 뒤 같은 사람을 3.7m 에서 다시 보자
+#       간격 2.55m > 반경 2.13m 가 되어 8번째 조난자로 등록됐다
+#       (월드에는 7명뿐. 표본 산포 0.00m 라 잡음이 아니라 계통 오차다).
+# 과다 계수는 별개 조난자를 합쳐 '덜 세는' 쪽이고, 과소 계수는 한 사람을
+# 둘로 세는 쪽이다. expected_victims 로 수색 종료를 판단하므로
+# 덜 세는 편이 안전하다(더 찾으러 다닌다).
+MERGE_PER_M      = 0.35   # 더 먼 관측 거리 1m 당 늘려줄 반경 (m)
 IGNORE_R         = 0.5    # 확인 완료 환자 억제 반경 (m)
 MSG_FRESHNESS_S  = 1.0    # YOLO 신선도 한계 (s)
 CONFIRM_N        = 3      # 연속 탐지 횟수 — 오탐 방지
@@ -53,6 +68,15 @@ INSPECT_SAMPLES     = 5                   # 정지·조준 상태에서 모을 �
 INSPECT_TIMEOUT_S   = 28.0                # 전체 한도 (대상까지 접근 + 정지 + 포탑 슬루)
 INSPECT_AFTER_AIM_S = 2.5                 # 조준 완료 후 대상이 안 보일 때 포기까지
 MAX_SAMPLE_SPREAD   = 0.30                # 표본이 이보다 흩어지면 등록 보류 (m)
+# 등록을 허용하는 최대 관측 거리.
+# 먼 거리 관측이 등록으로 이어지면 안 된다. 실제로 6.8~14.8m 에서 잡힌
+# 엉터리 투영 4건이 별개 조난자로 등록됐다(모두 같은 사람을 멀리서 잘못
+# 투영한 것). 기각된 사례는 전부 7.0~8.0m 구간이었다.
+# 값은 조사 거리(patrol_navigator inspect_standoff)에 맞춰야 한다.
+# standoff 1.5m 시절엔 4.0 이었으나, 서 있는 사람의 전신이 화면에 들어오도록
+# standoff 를 3.0m 로 늘리면서 실제 관측 거리가 4.0m 까지 올라왔다
+# (상한과 같아 아슬아슬했다). 접근 오차까지 감안해 5.5m 로 둔다.
+MAX_REGISTER_DIST   = 5.5                 # m
 
 # 블라인드코너 스캔 파라미터
 SCAN_DWELL_S     = 1.2           # 각 스캔 포인트 체류 시간 (s)
@@ -234,11 +258,17 @@ class TargetManager(Node):
 
     # ── 유틸 ──────────────────────────────────────────────────────────
 
-    def _is_known(self, gx, gy) -> bool:
-        for px, py, _, _ in self.confirmed.values():
-            if math.hypot(gx - px, gy - py) < MERGE_M:
-                return True
-        return False
+    def _match_known(self, gx, gy, dist):
+        """같은 사람으로 볼 기존 등록의 pid. 없으면 None.
+
+        중복 반경은 두 관측의 거리에 비례해 넓힌다. 멀리서 잡은 등록일수록
+        참값에서 벗어나 있으므로 고정 반경으로는 같은 사람을 못 묶는다.
+        """
+        for pid, (px, py, _, _, pdist) in self.confirmed.items():
+            r = MERGE_M + MERGE_PER_M * max(pdist, dist)
+            if math.hypot(gx - px, gy - py) < r:
+                return pid
+        return None
 
     def _is_ignored(self, gx, gy) -> bool:
         for ix, iy in self.ignored_targets:
@@ -328,7 +358,13 @@ class TargetManager(Node):
                 and self._detect_streak >= INSPECT_TRIGGER_N
                 and self.last_msg is not None):
             gx, gy = self._estimate_xy(self.last_msg)
-            if self._is_known(gx, gy) or self._is_ignored(gx, gy):
+            # 이미 아는 사람이어도, 훨씬 가까이서 다시 보게 됐다면 확인을
+            # 진행해 좌표를 정밀화한다(멀리서 먼저 잡힌 등록을 고쳐 쓴다).
+            known = self._match_known(gx, gy, self.last_msg.distance)
+            if known is not None:
+                if self.last_msg.distance >= self.confirmed[known][4] - 0.3:
+                    return
+            elif self._is_ignored(gx, gy):
                 return
             self._inspect_active     = True
             self._inspect_start_t    = now_sec
@@ -354,6 +390,14 @@ class TargetManager(Node):
                 f'탐지신선={self._detect_streak > 0}]')
             self._finish_inspect(registered=False)
             return
+
+        # 접근하는 동안에도 조준 목표를 최신 탐지로 계속 갱신한다.
+        # 최초 추정만 붙들면, 로봇이 대상 앞으로 이동한 뒤 포탑이 엉뚱한 곳을
+        # 겨눠 "겨눴는데 대상 없음(유령 후보)" 으로 버려진다.
+        # (실측: 후보 7건 중 5건이 이 경로로 폐기)
+        # 포탑은 이 노드가 직접 제어하므로 목표를 바꿔도 충돌하지 않는다.
+        if target_fresh and self.last_msg is not None:
+            self._inspect_aim = self._estimate_xy(self.last_msg)
 
         # 3) 정지 + 조준이 붙었는지 확인 (대상이 안 보여도 정착 여부는 판정)
         settled = (self.robot_speed <= INSPECT_SETTLE_SPD
@@ -429,17 +473,37 @@ class TargetManager(Node):
         msg = self.last_msg
         if msg is None:
             return
+        # 먼 거리 관측은 등록하지 않는다. 각도 오차가 거리에 비례해 커지고
+        # depth 도 사거리(8m) 밖이면 폴백 추정이라 좌표가 크게 튄다.
+        if msg.distance > MAX_REGISTER_DIST:
+            self.get_logger().info(
+                f'관측 거리 {msg.distance:.1f}m > {MAX_REGISTER_DIST}m — '
+                '등록 보류 (가까이 접근한 뒤 다시 확인)',
+                throttle_duration_sec=5.0)
+            return
         if gx is None or gy is None:
             gx, gy = self._estimate_xy(msg)
 
-        if self._is_known(gx, gy) or self._is_ignored(gx, gy):
+        known = self._match_known(gx, gy, msg.distance)
+        if known is not None:
+            # 이미 등록된 사람이다. 다만 이번이 더 가까운 관측이면 위치가
+            # 더 정확하므로 갱신한다(멀리서 먼저 잡힌 좌표를 고쳐 쓴다).
+            px, py, plv, plbl, pdist = self.confirmed[known]
+            if msg.distance < pdist - 0.3:
+                self.confirmed[known] = (gx, gy, plv, plbl, msg.distance)
+                self.republish_markers()
+                self.get_logger().info(
+                    f'#{known} 위치 갱신 ({px:.1f},{py:.1f}) → ({gx:.1f},{gy:.1f}) '
+                    f'— 더 가까이서 재관측 {pdist:.1f}m → {msg.distance:.1f}m')
+            return
+        if self._is_ignored(gx, gy):
             return
 
         pid  = self.pid_count; self.pid_count += 1
         lv   = msg.triage_level
         lbl  = msg.triage_label
         room = get_room_name(gx, gy)
-        self.confirmed[pid]  = (gx, gy, lv, lbl)
+        self.confirmed[pid]  = (gx, gy, lv, lbl, msg.distance)
         self.ignored_targets.append((gx, gy))
         self.republish_markers()
 
@@ -497,7 +561,7 @@ class TargetManager(Node):
         if not self.confirmed:
             return
         ma = MarkerArray()
-        for pid, (x, y, lv, lbl) in self.confirmed.items():
+        for pid, (x, y, lv, lbl, _) in self.confirmed.items():
             ma.markers.append(self._mk_sphere(pid, x, y, lv))
             ma.markers.append(self._mk_ring(pid, x, y, lv))
             ma.markers.append(self._mk_text(pid, x, y, lv, lbl))

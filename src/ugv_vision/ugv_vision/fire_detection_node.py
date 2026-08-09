@@ -101,9 +101,13 @@ class FireDetectionNode(Node):
         self.declare_parameter('inspect_enabled',   True)
         self.declare_parameter('inspect_samples',   5)
         self.declare_parameter('inspect_settle_spd', 0.05)      # 정지 판정(m/s)
-        self.declare_parameter('inspect_yaw_tol',   0.07)       # 조준 완료 판정(rad, ≈4°)
+        # 조준 완료 판정. 열원은 사람보다 크고(약 1m) 화면상 blob 중심이
+        # 프레임마다 흔들려 4도로는 잘 안 붙는다. 3m 거리에서 8도면
+        # 횡방향 0.42m — 열원 크기 안쪽이라 정확도 손해가 크지 않다.
+        self.declare_parameter('inspect_yaw_tol',   0.14)       # rad, ≈8°
         self.declare_parameter('inspect_timeout_s', 28.0)
         self.declare_parameter('inspect_after_aim_s', 2.5)      # 겨눴는데 안 보이면 포기
+        self.declare_parameter('inspect_retry_s', 120.0)        # 확인 실패한 열원 재시도 유예
 
         g = self.get_parameter
         self.thermal_topic = g('thermal_topic').value
@@ -129,6 +133,7 @@ class FireDetectionNode(Node):
         self.insp_yaw_tol   = float(g('inspect_yaw_tol').value)
         self.insp_timeout   = float(g('inspect_timeout_s').value)
         self.insp_after_aim = float(g('inspect_after_aim_s').value)
+        self.insp_retry_s   = float(g('inspect_retry_s').value)
 
         # 원본 픽셀 임계값 (16bit: K/lin_res)
         self.raw_thresh = self.temp_thresh_k / self.lin_res
@@ -152,6 +157,8 @@ class FireDetectionNode(Node):
         self._ci_settled  = None                  # 정지+조준이 붙은 시각
         self._ci_samples  = []
         self._ci_seen_t   = 0.0                   # 마지막으로 열원이 보인 시각
+        # 확인에 실패한 열원 — 바로 다시 시도하면 정지·재개를 무한 반복한다
+        self._ci_failed: list[tuple] = []         # [(x, y, 실패시각)]
         # 화재 소스: {'x','y','peak_k','hits','confirmed'}
         self.fires: list[dict] = []
         # 누적 열장 (0..100, 0=미검출)
@@ -460,6 +467,14 @@ class FireDetectionNode(Node):
                 self._register_fire(fx, fy, peak_k)
                 return
 
+        # 방금 확인에 실패한 열원이면 잠시 건너뛴다. 안 그러면 타임아웃 →
+        # 순찰 재개 → 같은 열원 재발견 → 다시 정지 를 무한 반복하며
+        # 로봇이 그 앞에서 영영 못 벗어난다(실측: 28초 주기로 반복).
+        for fx0, fy0, t0 in self._ci_failed:
+            if (now_s - t0 < self.insp_retry_s
+                    and math.hypot(fx - fx0, fy - fy0) < self.merge_d):
+                return
+
         self._ci_seen_t = now_s
 
         if not self._ci_active:
@@ -487,7 +502,11 @@ class FireDetectionNode(Node):
             return
 
         self._ci_samples.append((fx, fy))
-        self._ci_aim  = (fx, fy)
+        # _ci_aim 은 갱신하지 않는다. 포탑을 실제로 돌리는 쪽은
+        # patrol_navigator 이고, 그쪽은 /fire_candidate 로 받은 **최초** 위치를
+        # 계속 겨눈다. 여기서 조준 목표만 최신 추정치로 옮기면 두 노드의
+        # 기준이 어긋나 조준오차가 영영 안 좁혀진다.
+        # (실측: 표본 1개 모은 뒤 오차 12.2° 로 벌어져 타임아웃)
         self._ci_peak = max(self._ci_peak, peak_k)
 
         if len(self._ci_samples) >= self.insp_samples:
@@ -506,15 +525,35 @@ class FireDetectionNode(Node):
         if not self._ci_active:
             return
         now_s = self.get_clock().now().nanoseconds * 1e-9
+        # 정착 판정은 열원이 보이지 않아도 진행돼야 한다.
+        # _observe_fire 안에서만 갱신하면, 멈추고 겨눴는데 열원이 화면에서
+        # 안 잡히는 경우 정착이 영영 기록되지 않는다. 그러면 아래
+        # '겨눴는데 열원 없음' 경로가 막혀 28초 타임아웃을 통째로 쓰고,
+        # 로그에는 속도 0.000·조준오차 0.0° 인데 '정착 X' 라는 모순이 남는다.
+        if self._ci_settled is None and self._ci_aim is not None:
+            if (self.robot_speed <= self.insp_settle
+                    and abs(self._aim_yaw_error()) <= self.insp_yaw_tol):
+                self._ci_settled = now_s
         lost = now_s - self._ci_seen_t
         if now_s - self._ci_start > self.insp_timeout:
-            self.get_logger().warn('열원 조준 확인 시간초과 — 순찰 재개')
+            self.get_logger().warn(
+                f'열원 조준 확인 시간초과 — 순찰 재개 '
+                f'[표본 {len(self._ci_samples)}개, 속도 {self.robot_speed:.3f}m/s'
+                f'(한계 {self.insp_settle}), 조준오차 '
+                f'{math.degrees(abs(self._aim_yaw_error())):.1f}°'
+                f'(한계 {math.degrees(self.insp_yaw_tol):.0f}°), '
+                f'정착 {"O" if self._ci_settled else "X"}]')
             self._finish_ci(False)
         elif self._ci_settled is not None and lost > self.insp_after_aim:
             self.get_logger().info('겨눴는데 열원 없음 — 유령 후보로 판단, 순찰 재개')
             self._finish_ci(False)
 
     def _finish_ci(self, ok: bool):
+        if not ok and self._ci_aim is not None:
+            now_s = self.get_clock().now().nanoseconds * 1e-9
+            self._ci_failed = [f for f in self._ci_failed
+                               if now_s - f[2] < self.insp_retry_s]
+            self._ci_failed.append((self._ci_aim[0], self._ci_aim[1], now_s))
         self._ci_active  = False
         self._ci_aim     = None
         self._ci_settled = None
