@@ -248,7 +248,10 @@ class PatrolNavigator(Node):
         # 상대 목표에서 이 반경 안의 후보는 고르지 않는다(m).
         self.declare_parameter('peer_claim_radius', 6.0)
         # 두 로봇의 등록을 같은 사람으로 볼 거리(m).
-        self.declare_parameter('victim_merge_r', 1.5)
+        # 실측으로 두 로봇이 같은 사람을 1.5m 넘게 벌어져 등록해 8/7 이
+        # 나왔다. 관측 거리에 따라 오차가 커지므로 조금 넉넉히 잡는다.
+        # 덜 세는 쪽이 안전하다 — 더 찾으러 다닐 뿐이다.
+        self.declare_parameter('victim_merge_r', 2.2)
         # 탐사 목표를 이 사각형 안으로 제한한다 [xmin, ymin, xmax, ymax].
         # 비우면 제한 없음.
         #
@@ -687,7 +690,20 @@ class PatrolNavigator(Node):
         nb[:, 1:] |= unknown[:, :-1]
         nb[:-1, :] |= unknown[1:, :]
         nb[1:, :] |= unknown[:-1, :]
-        frontier_cells = int((free & nb).sum())
+        frontier = free & nb
+        # 탐사 범위 밖의 경계는 세지 않는다. 목표로 삼는 걸 막아 놓고
+        # 완료 판정에서는 세면 영원히 완료가 안 선다 — 자투리 미관측 때와
+        # 똑같은 어긋남이다(실측: 미탐사 경계 220셀이 기준 40 아래로 안 내려감).
+        if self.explore_bounds is not None:
+            x0, y0, x1, y1 = self.explore_bounds
+            ox = g.info.origin.position.x
+            oy = g.info.origin.position.y
+            xs = ox + (np.arange(W) + 0.5) * res
+            ys = oy + (np.arange(H) + 0.5) * res
+            inx = (xs >= x0) & (xs <= x1)
+            iny = (ys >= y0) & (ys <= y1)
+            frontier &= iny[:, None] & inx[None, :]
+        frontier_cells = int(frontier.sum())
         if self._seen is None or self._seen.shape != free.shape:
             unseen_area = float(free.sum()) * res * res
         else:

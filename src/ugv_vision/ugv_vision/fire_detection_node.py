@@ -72,6 +72,10 @@ class FireDetectionNode(Node):
         # 로봇이 둘이면 프레임이 ugv1/map, ugv2/map 으로 갈린다.
         # 기본값은 1대 구성과 같다.
         self.declare_parameter('map_frame', 'map')
+        # 동료 로봇 이름들. 비우면 1대 구성과 같다.
+        # 동료가 확정한 화재를 받아 내 목록에 합친다. 안 하면 두 로봇이
+        # 같은 불을 각각 세어 정답(4건)보다 많이 보고한다(실측 7/4).
+        self.declare_parameter('peers', [''])
         self.declare_parameter('base_frame', 'base_footprint')
         self.map_frame  = self.get_parameter('map_frame').value
         self.base_frame = self.get_parameter('base_frame').value
@@ -167,6 +171,9 @@ class FireDetectionNode(Node):
         self._ci_failed: list[tuple] = []         # [(x, y, 실패시각)]
         # 화재 소스: {'x','y','peak_k','hits','confirmed'}
         self.fires: list[dict] = []
+        for _peer in [x for x in self.get_parameter('peers').value if x]:
+            self.create_subscription(
+                PointStamped, f'/{_peer}/fire_alert', self._peer_fire_cb, 10)
         # 누적 열장 (0..100, 0=미검출)
         self.heat = np.zeros((_N, _N), dtype=np.float32)
 
@@ -566,6 +573,23 @@ class FireDetectionNode(Node):
         self._ci_samples = []
         m = Bool(); m.data = bool(ok)
         self.pub_ci_done.publish(m)
+
+    def _peer_fire_cb(self, msg: PointStamped):
+        """동료가 확정한 화재를 내 목록에 합친다.
+
+        이미 아는 불이면 무시한다. 새 불이면 '확정' 으로 바로 넣는다 —
+        동료가 이미 조준 확인까지 마친 것이라 다시 검증할 이유가 없다.
+        경보를 다시 쏘지는 않는다(그러면 둘이 서로 메아리를 주고받는다).
+        """
+        fx, fy = msg.point.x, msg.point.y
+        for f in self.fires:
+            if math.hypot(f['x'] - fx, f['y'] - fy) < self.merge_d:
+                return
+        self.fires.append({'x': fx, 'y': fy, 'peak_k': 0.0,
+                           'hits': self.confirm_hits, 'confirmed': True})
+        self._paint_bloom(fx, fy)
+        self.get_logger().info(
+            f'동료가 찾은 화재 합침 map ({fx:.1f}, {fy:.1f}) — 총 {len(self.fires)}건')
 
     def _register_fire(self, fx, fy, peak_k):
         # 기존 화재와 병합

@@ -87,6 +87,8 @@ ROBOTS = [
 def generate_launch_description():
     # 런치 인자는 문자열이므로 여기서 바로 못 읽는다. 환경변수로 받는다.
     n = int(os.environ.get('UGV_N_ROBOTS', '2'))
+    # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
+    dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
     pkg_bringup = get_package_share_directory('ugv_bringup')
     pkg_desc = get_package_share_directory('ugv_description')
@@ -183,9 +185,12 @@ def generate_launch_description():
                     launch_arguments={
                         'namespace': name,
                         'use_sim_time': 'true',
+                        # ★ 파일 이름에 도메인을 넣는다. 안 그러면 같은
+                        #   머신에서 시뮬을 둘 돌릴 때(A/B 비교) 두 런이
+                        #   /tmp/nav2_ugv1.yaml 을 서로 덮어쓴다.
                         'params_file': namespaced_nav2_params(
                             nav2_params, prefix,
-                            os.path.join('/tmp', f'nav2_{name}.yaml')),
+                            os.path.join('/tmp', f'nav2_{dom}_{name}.yaml')),
                         'slam': 'True',
                     }.items()),
             ])]))
@@ -249,7 +254,13 @@ def generate_launch_description():
                  remappings=tf_remap, parameters=common, output='screen'),
             Node(package='ugv_vision', executable='fire_detection_node',
                  name='fire_detection_node', namespace=name,
-                 remappings=tf_remap, parameters=common, output='screen'),
+                 remappings=tf_remap,
+                 # 동료가 찾은 화재를 합쳐야 '총 N건' 이 팀 기준이 된다.
+                 # 이 노드가 그 숫자를 찍는다(순찰 노드가 아니다).
+                 parameters=common + [{
+                     'peers': [o['name'] for o in robots
+                               if o['name'] != name] or ['']}],
+                 output='screen'),
             # 순찰 노드만 공용 지도를 본다. 상대가 이미 만든 지도를 알아야
             # 같은 곳을 다시 훑지 않는다. 목표는 map 프레임으로 나가고
             # Nav2 가 자기 프레임으로 변환해 받는다.
