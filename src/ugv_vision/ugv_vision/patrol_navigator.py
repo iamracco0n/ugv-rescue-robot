@@ -85,7 +85,8 @@ def count_unique_victims(entries, merge_r):
     return len(clusters)
 
 
-def stuck_decision(ref, rx, ry, ryaw, now, eps_m, eps_rad, confirm_s):
+def stuck_decision(ref, rx, ry, ryaw, now, eps_m, eps_rad, confirm_s,
+                   commanded=True):
     """진전이 있었는지 보고 박힘을 판정한다.
 
     반환: (박힘인가, 새 기준 또는 None)
@@ -103,6 +104,12 @@ def stuck_decision(ref, rx, ry, ryaw, now, eps_m, eps_rad, confirm_s):
     dyaw = abs(math.atan2(math.sin(ryaw - syaw), math.cos(ryaw - syaw)))
     if math.hypot(rx - sx, ry - sy) > eps_m or dyaw > eps_rad:
         return False, (rx, ry, ryaw, now)      # 진전 있음 → 기준 갱신
+    # Nav2 가 애초에 속도를 안 주고 있으면 박힌 게 아니라 일부러 선 것이다.
+    # Nav2 는 경로가 막히면 wait/spin/backup 으로 스스로 복구하는데, 그때
+    # 후진 탈출을 걸면 복구를 깨뜨리고 다시 복구가 돌아 무한 반복이 된다.
+    # 실측(2대): 박힘 82건, Nav2 복구 wait/spin/backup 각 65/65/64회.
+    if not commanded:
+        return False, (rx, ry, ryaw, now)      # 기준을 미뤄 누적을 막는다
     if now - st > confirm_s:
         return True, None
     return False, None
@@ -232,6 +239,8 @@ class PatrolNavigator(Node):
         # 로봇이 180도 도는 동안 '안 움직인다' 고 오판해 후진 탈출이 돌고,
         # 앞뒤로 왕복만 하게 된다.
         self.declare_parameter('stuck_turn_eps',  0.30)     # 이 이상 돌면 정상(rad)
+        # Nav2 명령 속도가 이보다 작으면 '가라고 안 한 것' 으로 본다.
+        self.declare_parameter('stuck_cmd_eps',   0.02)
         self.declare_parameter('escape_speed',    0.35)     # 후진 속도(m/s)
         self.declare_parameter('escape_max_s',    5.0)      # 후진 최대 시간(s)
         self.declare_parameter('escape_min_move', 0.8)      # 이만큼 물러나면 탈출 성공(m)
@@ -325,6 +334,7 @@ class PatrolNavigator(Node):
         self.stuck_confirm_s   = float(self.get_parameter('stuck_confirm_s').value)
         self.stuck_move_eps    = float(self.get_parameter('stuck_move_eps').value)
         self.stuck_turn_eps    = float(self.get_parameter('stuck_turn_eps').value)
+        self.stuck_cmd_eps     = float(self.get_parameter('stuck_cmd_eps').value)
         self.escape_speed      = float(self.get_parameter('escape_speed').value)
         self.escape_max_s      = float(self.get_parameter('escape_max_s').value)
         self.escape_min_move   = float(self.get_parameter('escape_min_move').value)
@@ -432,6 +442,10 @@ class PatrolNavigator(Node):
         # 장애물 탈출용 — 로봇이 장애물 안에 들어가면 Nav2 는 시작 자세가
         # 무효라 경로를 못 낸다. 그때만 직접 후진 명령을 낸다.
         self.cmd_pub    = self.create_publisher(Twist, 'cmd_vel', 10)
+        # Nav2 가 지금 실제로 '가라' 고 하는지 본다. 안 가라고 하는 동안
+        # 안 움직이는 건 박힌 게 아니라 일부러 선 것이다(복구 동작 중).
+        self._cmd_mag = 0.0
+        self.create_subscription(Twist, 'cmd_vel', self._cmd_watch, 10)
         # 한 바퀴 수색 완료 신호
         self.sweep_pub  = self.create_publisher(Bool, 'sweep_complete', 10)
         # 카메라로 실제 훑은 구역 / 아직 못 본 구역을 눈으로 구분하기 위한 격자.
@@ -1178,6 +1192,10 @@ class PatrolNavigator(Node):
         t.linear.x = -abs(self.escape_speed)
         self.cmd_pub.publish(t)
 
+    def _cmd_watch(self, msg: Twist):
+        """Nav2 가 내는 속도 명령의 크기. 박힘 오판을 막는 데 쓴다."""
+        self._cmd_mag = abs(msg.linear.x) + abs(msg.angular.z) * 0.3
+
     def _update_stuck(self, rx, ry, now) -> bool:
         """순찰 중인데 실제로 안 움직이면 '박힘' 으로 본다.
 
@@ -1193,7 +1211,8 @@ class PatrolNavigator(Node):
             return False
         stuck, new_ref = stuck_decision(
             self._stuck_ref, rx, ry, ryaw, now,
-            self.stuck_move_eps, self.stuck_turn_eps, self.stuck_confirm_s)
+            self.stuck_move_eps, self.stuck_turn_eps, self.stuck_confirm_s,
+            commanded=self._cmd_mag > self.stuck_cmd_eps)
         if new_ref is not None:
             self._stuck_ref = new_ref
         return stuck

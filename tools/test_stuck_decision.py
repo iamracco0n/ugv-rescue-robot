@@ -89,7 +89,20 @@ def main():
                               EPS_M, EPS_RAD, CONFIRM)
     check('가만히 있지만 아직 5초 — 박힘 아님', stuck, False)
 
-    # ── 5. 각도 wrap 을 제대로 다루는가 ────────────────────────────
+    # ── 5. Nav2 가 스스로 멈춘 것은 박힘이 아니다 ──────────────────
+    # Nav2 는 경로가 막히면 wait / spin / backup 으로 스스로 복구한다.
+    # 그동안 로봇은 당연히 안 움직인다. 이때 박힘으로 보고 후진 탈출을
+    # 걸면 Nav2 의 복구를 깨뜨리고, 다시 복구가 돌아 무한 반복이 된다.
+    # 실측(2대 구성): 박힘 82건, Nav2 복구 wait/spin/backup 각 65/65/64회.
+    stuck, _ = stuck_decision(ref, 0.05, 0.0, 0.05, 109.0,
+                              EPS_M, EPS_RAD, CONFIRM, commanded=False)
+    check('명령 속도가 0 이면 박힘 아님(Nav2 복구 중)', stuck, False)
+
+    stuck, _ = stuck_decision(ref, 0.05, 0.0, 0.05, 109.0,
+                              EPS_M, EPS_RAD, CONFIRM, commanded=True)
+    check('가라고 했는데 안 가면 박힘', stuck, True)
+
+    # ── 6. 각도 wrap 을 제대로 다루는가 ────────────────────────────
     # 3.10 rad 과 -3.10 rad 은 실제로 0.08 rad 차이(약 5도)다. 단순 뺄셈이면
     # 6.2 rad 으로 잘못 커져 '크게 돌았다' 고 오판한다.
     ref_wrap = (0.0, 0.0, 3.10, 100.0)
@@ -106,7 +119,7 @@ def main():
     if fails:
         print(f'실패 {fails}건')
         return 1
-    print('10개 사례 전부 통과')
+    print('12개 사례 전부 통과')
     return 0
 
 
