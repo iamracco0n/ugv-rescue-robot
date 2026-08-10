@@ -158,8 +158,12 @@ class PatrolNavigator(Node):
         # 로봇이 제자리에서 조각만 갈아댄다(실측: 목표 35개 중 27개가 주변
         # 미관측, 이동 범위가 56m 건물의 가운데 15m 뿐이었다).
         self.declare_parameter('visual_min_size', 300)      # 셀 수(0.75m^2)
-        # 이 반경 안에 안 본 구역이 있으면, 멀리 있는 미탐사 경계보다 먼저 훑는다
+        # 방을 못 구할 때(지도 미수신 등)만 쓰는 대체 반경
         self.declare_parameter('sweep_first_radius', 5.0)
+        # 방 분리용 침식 반경(m). **문 폭의 절반보다 커야** 문이 끊긴다.
+        # 문 1.8m 면 0.9m 초과가 필요하다. 너무 키우면 좁은 방이 통째로
+        # 사라지고, 너무 줄이면 방이 안 갈려 건물 전체가 한 방이 된다.
+        self.declare_parameter('room_erode_m', 1.0)
         # 방 안 마무리용 군집 하한(셀). 전역 후보(visual_min_size)보다 작게
         # 잡아 구석의 작은 사각지대까지 목표로 삼는다. 이 값이 크면 계획기가
         # 못 잡는 조각이 남아 완료 판정이 영원히 안 선다.
@@ -232,6 +236,7 @@ class PatrolNavigator(Node):
         self.cam_fov           = float(self.get_parameter('cam_fov_rad').value)
         self.visual_min        = int(self.get_parameter('visual_min_size').value)
         self.sweep_first_r     = float(self.get_parameter('sweep_first_radius').value)
+        self.room_erode_m      = float(self.get_parameter('room_erode_m').value)
         self.visual_min_local  = int(self.get_parameter('visual_min_local').value)
         self.room_clear_budget = float(self.get_parameter('room_clear_budget_s').value)
         self.visual_clearance  = float(self.get_parameter('visual_clearance').value)
@@ -921,9 +926,24 @@ class PatrolNavigator(Node):
         # 여러 개인 건물에서는 라이다 프론티어가 계속 남아 있어서 로봇이
         # 들어간 방의 사각지대를 안 보고 다음 방으로 떠나버린다.
         # → 반경 sweep_first_r 안에 안 본 구역이 있으면 그것부터 처리한다.
-        # 방 안을 마무리할 때는 작은 조각까지 목표로 삼는다.
-        near = [c for c in self._find_visual_frontiers(self.visual_min_local)
-                if math.hypot(c[0] - rx, c[1] - ry) <= self.sweep_first_r]
+        # '지금 있는 방' 안의 미관측을 먼저 없앤다. 방을 못 구하면(지도 미수신
+        # 등) 예전처럼 반경으로 대신한다.
+        room = self._room_mask(rx, ry)
+        cand_all = self._find_visual_frontiers(self.visual_min_local)
+        if room is not None:
+            g = self._map_msg
+            res = g.info.resolution
+            ox, oy = g.info.origin.position.x, g.info.origin.position.y
+            H, W = room.shape
+
+            def in_room(px, py):
+                ix, iy = int((px - ox) / res), int((py - oy) / res)
+                return 0 <= ix < W and 0 <= iy < H and room[iy, ix]
+
+            near = [c for c in cand_all if in_room(c[0], c[1])]
+        else:
+            near = [c for c in cand_all
+                    if math.hypot(c[0] - rx, c[1] - ry) <= self.sweep_first_r]
         now = self._now()
 
         # '들어간 방은 다 보고 나간다'.
@@ -942,7 +962,7 @@ class PatrolNavigator(Node):
                 self._local_anchor = (rx, ry)
                 self._local_since = now
             if now - self._local_since <= self.room_clear_budget:
-                cands, kind = near, '방 안 미관측(마무리)'
+                cands, kind = near, ('방 안 미관측(마무리)' if room is not None else '주변 미관측(반경대체)')
             else:                               # 예산 초과 → 일단 나갔다 온다
                 self._local_anchor = None
                 cands = self._find_frontiers()
@@ -985,6 +1005,46 @@ class PatrolNavigator(Node):
             if score > best_score:
                 best_score, best = score, (goal, (fx, fy))
         return best
+
+    def _room_mask(self, rx, ry):
+        """로봇이 지금 있는 '방' 의 셀 마스크. 못 구하면 None.
+
+        예전에는 '반경 5m 안의 미관측' 을 방으로 삼았다. 방이 그보다 크면
+        5m 안만 치우고 나가버린다 — 시간 예산이 방 크기에 안 맞는 것과
+        같은 문제다(실측: 예산이 165번 중 3번만 걸렸다. 즉 예산값을 바꿔도
+        동작이 거의 안 변했다).
+
+        자유공간을 문 폭 절반보다 크게 침식하면 문이 먼저 끊겨 방이
+        분리된다. 남은 '속살' 에 각 자유공간 셀을 귀속시켜 방을 만든다.
+        되돌릴 때 팽창을 쓰면 문틈으로 새어 옆방을 침범하므로 귀속 방식을
+        쓴다(합성 지도 검증: tools/test_room_segment.py).
+        """
+        g = self._map_msg
+        if g is None:
+            return None
+        W, H = g.info.width, g.info.height
+        res = g.info.resolution
+        ox, oy = g.info.origin.position.x, g.info.origin.position.y
+        cx = int((rx - ox) / res)
+        cy = int((ry - oy) / res)
+        if not (0 <= cx < W and 0 <= cy < H):
+            return None
+        arr = np.asarray(g.data, dtype=np.int16).reshape(H, W)
+        free = (arr >= 0) & (arr < 25)
+        if not free[cy, cx]:
+            return None
+        er = max(1, int(round(self.room_erode_m / res)))
+        dist = ndimage.distance_transform_edt(free)
+        lbl, n = ndimage.label(dist > er, structure=np.ones((3, 3), bool))
+        if n == 0:
+            return None
+        idx = ndimage.distance_transform_edt(
+            lbl == 0, return_distances=False, return_indices=True)
+        owner = lbl[idx[0], idx[1]]
+        my = owner[cy, cx]
+        if my == 0:
+            return None
+        return (owner == my) & free
 
     def _pick_far_goal(self, rx, ry):
         """지역 루프 탈출용 — 거리 벌점 없이 '가장 큰 미관측 덩어리'로 간다.
