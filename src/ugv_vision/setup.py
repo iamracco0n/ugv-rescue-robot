@@ -28,6 +28,7 @@ setup(
             'fire_detection_node = ugv_vision.fire_detection_node:main',
             'patrol_navigator = ugv_vision.patrol_navigator:main',
             'dataset_capture_node = ugv_vision.dataset_capture_node:main',
+            'map_merge_node = ugv_vision.map_merge_node:main',
         ],
     },
 )

@@ -175,6 +175,36 @@ def generate_launch_description():
                     }.items()),
             ])]))
 
+    # ── 2단계: 공용 map 프레임과 지도 병합 ───────────────────────────
+    # 각 로봇의 map 프레임 원점은 그 로봇이 출발한 자리다(slam_toolbox 규약).
+    # 스폰 위치를 우리가 정하므로 오프셋을 이미 안다 → 정렬 탐색이 필요 없다.
+    # 첫 로봇의 map 을 공용 map 으로 삼고 나머지를 그만큼 밀어 붙인다.
+    #
+    # Nav2 는 건드리지 않는다. 각자 자기 map 프레임에서 계속 계획하고,
+    # 공용 지도는 '어디를 탐사할지' 를 정하는 순찰 노드만 쓴다. 목표는
+    # map 프레임으로 나가고 Nav2 가 자기 프레임으로 변환해 받는다.
+    # 이렇게 두면 1단계에서 검증된 Nav2 구성을 흔들지 않는다.
+    x0, y0 = float(ROBOTS[0]['x']), float(ROBOTS[0]['y'])
+    for r in ROBOTS:
+        dx, dy = float(r['x']) - x0, float(r['y']) - y0
+        actions.append(Node(
+            package='tf2_ros', executable='static_transform_publisher',
+            name=f"map_to_{r['name']}",
+            arguments=['--x', str(dx), '--y', str(dy),
+                       '--frame-id', 'map',
+                       '--child-frame-id', f"{r['name']}/map"],
+            parameters=[{'use_sim_time': True}], output='screen'))
+
+    actions.append(TimerAction(period=20.0, actions=[
+        Node(package='ugv_vision', executable='map_merge_node',
+             name='map_merge_node',
+             parameters=[{
+                 'use_sim_time': True,
+                 'robots': [r['name'] for r in ROBOTS],
+                 'spawn_x': [float(r['x']) for r in ROBOTS],
+                 'spawn_y': [float(r['y']) for r in ROBOTS],
+             }], output='screen')]))
+
     # 비전·순찰 — Nav2 lifecycle 활성화가 끝난 뒤에 띄운다. 먼저 띄우면
     # torch/CUDA 로딩 CPU 스파이크가 lifecycle 전환과 겹쳐 스택이 죽는다.
     for i, r in enumerate(ROBOTS):
@@ -197,10 +227,15 @@ def generate_launch_description():
             Node(package='ugv_vision', executable='fire_detection_node',
                  name='fire_detection_node', namespace=name,
                  remappings=tf_remap, parameters=common, output='screen'),
+            # 순찰 노드만 공용 지도를 본다. 상대가 이미 만든 지도를 알아야
+            # 같은 곳을 다시 훑지 않는다. 목표는 map 프레임으로 나가고
+            # Nav2 가 자기 프레임으로 변환해 받는다.
             Node(package='ugv_vision', executable='patrol_navigator',
                  name='patrol_navigator', namespace=name,
-                 remappings=tf_remap,
-                 parameters=common + [{
+                 remappings=tf_remap + [('map', '/map')],
+                 parameters=[{'use_sim_time': True,
+                              'map_frame': 'map',
+                              'base_frame': f'{prefix}base_footprint'}] + [{
                      'patrol_mode': 'explore',
                      # 런치 인자는 문자열이라 그대로 주면 rclpy 가 STRING 으로
                      # 추론해 INTEGER 파라미터와 안 맞고 노드가 즉시 죽는다.
