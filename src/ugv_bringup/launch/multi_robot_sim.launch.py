@@ -85,6 +85,9 @@ ROBOTS = [
 
 
 def generate_launch_description():
+    # 런치 인자는 문자열이므로 여기서 바로 못 읽는다. 환경변수로 받는다.
+    n = int(os.environ.get('UGV_N_ROBOTS', '2'))
+    robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
     pkg_bringup = get_package_share_directory('ugv_bringup')
     pkg_desc = get_package_share_directory('ugv_description')
     pkg_nav = get_package_share_directory('ugv_navigation')
@@ -108,6 +111,9 @@ def generate_launch_description():
         # 3단계(목표 선점·관측 공유·명부 합산)를 껐다 켤 수 있게 한다.
         # 껐을 때와 켰을 때를 비교해야 3단계가 도움이 되는지 알 수 있다.
         DeclareLaunchArgument('team_share', default_value='true'),
+        # 대수를 줄여 돌릴 수 있게 한다. 1 로 두면 네임스페이스 구성 자체가
+        # 멀쩡한지(로봇끼리 간섭과 무관하게) 가릴 수 있다.
+        DeclareLaunchArgument('n_robots', default_value='2'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -126,7 +132,7 @@ def generate_launch_description():
              condition=UnlessCondition(headless)),
     ]
 
-    for i, r in enumerate(ROBOTS):
+    for i, r in enumerate(robots):
         name = r['name']
         prefix = f'{name}/'
 
@@ -195,7 +201,7 @@ def generate_launch_description():
     # 공용 지도는 '어디를 탐사할지' 를 정하는 순찰 노드만 쓴다. 목표는
     # map 프레임으로 나가고 Nav2 가 자기 프레임으로 변환해 받는다.
     # 이렇게 두면 1단계에서 검증된 Nav2 구성을 흔들지 않는다.
-    for r in ROBOTS:
+    for r in robots:
         actions.append(Node(
             package='tf2_ros', executable='static_transform_publisher',
             name=f"map_to_{r['name']}",
@@ -209,14 +215,14 @@ def generate_launch_description():
              name='map_merge_node',
              parameters=[{
                  'use_sim_time': True,
-                 'robots': [r['name'] for r in ROBOTS],
-                 'offset_x': [0.0 for _ in ROBOTS],
-                 'offset_y': [0.0 for _ in ROBOTS],
+                 'robots': [r['name'] for r in robots],
+                 'offset_x': [0.0 for _ in robots],
+                 'offset_y': [0.0 for _ in robots],
              }], output='screen')]))
 
     # 비전·순찰 — Nav2 lifecycle 활성화가 끝난 뒤에 띄운다. 먼저 띄우면
     # torch/CUDA 로딩 CPU 스파이크가 lifecycle 전환과 겹쳐 스택이 죽는다.
-    for i, r in enumerate(ROBOTS):
+    for i, r in enumerate(robots):
         name = r['name']
         prefix = f'{name}/'
         # TF 리스너는 절대 '/tf' 를 구독한다(tf2_ros 구현). 네임스페이스를
@@ -246,8 +252,8 @@ def generate_launch_description():
                               'map_frame': 'map',
                               'base_frame': f'{prefix}base_footprint',
                               # 3단계: 동료의 목표·관측·명부를 받는다
-                              'peers': [o['name'] for o in ROBOTS
-                                        if o['name'] != name],
+                              'peers': [o['name'] for o in robots
+                                        if o['name'] != name] or [''],
                               'team_share': ParameterValue(
                                   LaunchConfiguration('team_share'),
                                   value_type=bool)}] + [{
