@@ -99,6 +99,9 @@ def generate_launch_description():
         DeclareLaunchArgument('world', default_value='rescue_building_large'),
         DeclareLaunchArgument('headless', default_value='false'),
         DeclareLaunchArgument('expected_victims', default_value='7'),
+        # 3단계(목표 선점·관측 공유·명부 합산)를 껐다 켤 수 있게 한다.
+        # 껐을 때와 켰을 때를 비교해야 3단계가 도움이 되는지 알 수 있다.
+        DeclareLaunchArgument('team_share', default_value='true'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -238,7 +241,10 @@ def generate_launch_description():
                               'base_frame': f'{prefix}base_footprint',
                               # 3단계: 동료의 목표·관측·명부를 받는다
                               'peers': [o['name'] for o in ROBOTS
-                                        if o['name'] != name]}] + [{
+                                        if o['name'] != name],
+                              'team_share': ParameterValue(
+                                  LaunchConfiguration('team_share'),
+                                  value_type=bool)}] + [{
                      'patrol_mode': 'explore',
                      # 런치 인자는 문자열이라 그대로 주면 rclpy 가 STRING 으로
                      # 추론해 INTEGER 파라미터와 안 맞고 노드가 즉시 죽는다.

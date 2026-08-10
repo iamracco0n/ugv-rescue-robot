@@ -212,6 +212,9 @@ class PatrolNavigator(Node):
         # ── 팀 공유(로봇 여러 대) ──────────────────────────────
         # peers 가 비면 1대 구성과 완전히 같다.
         self.declare_parameter('peers', [''])
+        # 거짓이면 동료가 있어도 공유를 안 한다. 3단계 효과를 A/B 로 재기
+        # 위한 스위치다 — 켠 것과 끈 것을 비교해야 도움이 되는지 알 수 있다.
+        self.declare_parameter('team_share', True)
         # 상대 목표에서 이 반경 안의 후보는 고르지 않는다(m).
         self.declare_parameter('peer_claim_radius', 6.0)
         # 두 로봇의 등록을 같은 사람으로 볼 거리(m).
@@ -311,6 +314,8 @@ class PatrolNavigator(Node):
         self.explore_tmo_max   = float(self.get_parameter('explore_goal_timeout_max').value)
         self.far_goal_min_dist = float(self.get_parameter('far_goal_min_dist').value)
         self.peers = [x for x in self.get_parameter('peers').value if x]
+        if not self.get_parameter('team_share').value:
+            self.peers = []
         self.peer_claim_r = float(self.get_parameter('peer_claim_radius').value)
         self.victim_merge_r = float(self.get_parameter('victim_merge_r').value)
         self.goal_dist_penalty = float(self.get_parameter('goal_dist_penalty').value)
