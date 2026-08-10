@@ -80,6 +80,12 @@ def _robot(context, *args, **kwargs):
             package='robot_state_publisher',
             executable='robot_state_publisher',
             namespace=ns,
+            # ★ robot_state_publisher 는 절대경로 /tf, /tf_static 에 발행한다.
+            #    네임스페이스만 씌우면 안 따라와서 전역 /tf_static 으로 새고,
+            #    같은 이름공간의 SLAM 이 ugv1/laser_frame 을 못 찾아 스캔을
+            #    전부 버린다(실측: /ugv1/tf_static 이 빈 채로 남음).
+            #    상대 이름으로 되돌려야 네임스페이스가 적용된다.
+            remappings=[('/tf', 'tf'), ('/tf_static', 'tf_static')],
             parameters=[{
                 'robot_description': ParameterValue(
                     Command(['xacro ', xacro_file, ' prefix:=', prefix]),

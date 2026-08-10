@@ -143,8 +143,10 @@ def generate_launch_description():
                      'map_frame': f'{prefix}map',
                      'scan_topic': f'/{prefix}scan',
                  }],
+                 # tf 도 같은 이유로 상대 이름으로 되돌린다(robot.launch.py 주석 참조)
                  remappings=[('/map', f'/{name}/map'),
-                             ('/map_metadata', f'/{name}/map_metadata')],
+                             ('/map_metadata', f'/{name}/map_metadata'),
+                             ('/tf', 'tf'), ('/tf_static', 'tf_static')],
                  output='screen')]))
 
         # Nav2 — 프레임 이름을 로봇별로 바꿔 끼운다. 안 바꾸면 두 스택이
