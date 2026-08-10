@@ -49,12 +49,13 @@ def generate_launch_description():
     # 탐사 성향 조절 — 파라미터 스윕으로 최적값을 찾기 위해 런치에서 연다.
     # 노드는 초기화 때 한 번만 읽으므로 런타임 param set 으로는 못 바꾼다.
     budget_arg = DeclareLaunchArgument(
-        'room_clear_budget_s', default_value='240.0',
-        description='한 구역을 마무리하는 데 쓸 최대 시간(초). '
-                    '크면 꼼꼼하고 느리다')
+        'goal_dist_penalty', default_value='0.5',
+        description='목표 점수에서 거리 1m 에 매기는 벌점(m^2). '
+                    '크면 가까운 곳만 맴돌고, 작으면 멀리 나간다')
     radius_arg = DeclareLaunchArgument(
-        'sweep_first_radius', default_value='5.0',
-        description='이 반경 안의 미관측을 먼저 훑는다(m)')
+        'frontier_view_r', default_value='8.0',
+        description='라이다 경계를 넘었을 때 새로 보이는 깊이(m). '
+                    '경계 길이를 넓이로 환산할 때 쓴다')
 
     # 1. Gazebo + Robot + 브리지 + RViz (열화상 브리지 포함)
     gazebo_launch = IncludeLaunchDescription(
@@ -131,11 +132,11 @@ def generate_launch_description():
                      # 넘기면 rclpy 가 INTEGER 로 추론해 DOUBLE 파라미터와
                      # 타입이 안 맞고, 노드가 기동 즉시 죽는다
                      # (InvalidParameterTypeException).
-                     'room_clear_budget_s': ParameterValue(
-                         LaunchConfiguration('room_clear_budget_s'),
+                     'goal_dist_penalty': ParameterValue(
+                         LaunchConfiguration('goal_dist_penalty'),
                          value_type=float),
-                     'sweep_first_radius': ParameterValue(
-                         LaunchConfiguration('sweep_first_radius'),
+                     'frontier_view_r': ParameterValue(
+                         LaunchConfiguration('frontier_view_r'),
                          value_type=float),
                  }], output='screen'),
         ]

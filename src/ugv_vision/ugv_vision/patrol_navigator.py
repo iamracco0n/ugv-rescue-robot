@@ -50,6 +50,29 @@ IDLE, PATROL, MANUAL, FIRE_ALARM = 'IDLE', 'PATROL', 'MANUAL', 'FIRE_ALARM'
 INSPECT = 'INSPECT'      # 조난자 후보 확인 — 정지 후 포탑 조준
 ESCAPE  = 'ESCAPE'       # 장애물 안에 박힘 — 후진으로 탈출
 
+def goal_score(kind, n_cells, dist_m, res, view_r, lam):
+    """탐사 목표 후보의 점수 — 클수록 좋다. 단위는 m^2.
+
+    후보가 두 종류인데 n 의 단위가 다르다는 것이 함정이다.
+
+      kind='frontier'  n = 미탐사와 맞닿은 '경계선 길이'(1셀 두께)
+      kind='visual'    n = 아직 카메라로 못 본 바닥 '면적'
+
+    5m 짜리 구역이면 전자는 약 100셀, 후자는 약 10000셀로 100배 벌어진다.
+    그대로 한 점수식에 넣으면 시각 후보가 언제나 이겨 라이다 경계가 영영
+    안 뽑히고 지도가 안 넓어진다. 그래서 둘 다 '새로 얻을 넓이' 로 바꾼다.
+
+      시각   넓이 = n * res^2                 (못 본 바닥 그 자체)
+      경계   넓이 = n * res * view_r          (경계 길이 x 넘어가면 보일 깊이)
+
+    lam 은 '1m 더 가는 값어치를 몇 m^2 로 볼 것인가' 다. 로봇이 훑으며
+    지나가는 폭이 약 1.4m 이므로 그보다 작게 잡아야 먼 곳으로 나간다.
+    """
+    gain = (n_cells * res * res if kind == 'visual'
+            else n_cells * res * view_r)
+    return gain - lam * dist_m
+
+
 def sweep_decision(fr_cells, unseen, unseen_budget, done_frontier_cells,
                    goals_done, min_goals, free_area, min_area,
                    victims, expected):
@@ -119,6 +142,13 @@ class PatrolNavigator(Node):
         self.declare_parameter('explore_goal_timeout_max', 150.0)
         # 지역 루프 탈출 시 최소 이 거리 이상 떨어진 목표를 고른다(m)
         self.declare_parameter('far_goal_min_dist', 8.0)
+        # 목표 점수에서 거리 1m 에 매기는 벌점(m^2). '1m 더 가는 값어치를
+        # 몇 m^2 로 보는가'. 로봇이 훑으며 지나가는 폭이 약 1.4m 이므로
+        # 그보다 작게 잡아야 먼 미관측 구역으로 나간다.
+        self.declare_parameter('goal_dist_penalty', 0.5)
+        # 라이다 경계를 넘었을 때 새로 보이는 깊이(m). 경계 '길이' 를
+        # 넓이로 환산할 때 쓴다.
+        self.declare_parameter('frontier_view_r', 8.0)
         # 직선 접근이 막혔을 때 대상 주위를 몇 방향까지 뒤질지
         self.declare_parameter('approach_ring_n', 12)
         # 장애물 탈출
@@ -158,24 +188,10 @@ class PatrolNavigator(Node):
         # 로봇이 제자리에서 조각만 갈아댄다(실측: 목표 35개 중 27개가 주변
         # 미관측, 이동 범위가 56m 건물의 가운데 15m 뿐이었다).
         self.declare_parameter('visual_min_size', 300)      # 셀 수(0.75m^2)
-        # 이 반경 안에 안 본 구역이 있으면, 멀리 있는 미탐사 경계보다 먼저 훑는다
-        self.declare_parameter('sweep_first_radius', 5.0)
-        # 방 안 마무리용 군집 하한(셀). 전역 후보(visual_min_size)보다 작게
-        # 잡아 구석의 작은 사각지대까지 목표로 삼는다. 이 값이 크면 계획기가
-        # 못 잡는 조각이 남아 완료 판정이 영원히 안 선다.
+        # 후보로 삼을 미관측 군집의 하한(셀). 구석의 작은 사각지대까지
+        # 목표로 삼아야 한다. 이 값이 크면 계획기가 못 잡는 조각이 남아
+        # 완료 판정이 영원히 안 선다.
         self.declare_parameter('visual_min_local', 40)      # 셀 수(0.1m^2)
-        # 한 구역을 마무리하는 데 쓸 수 있는 최대 시간(초).
-        # 예전의 '연속 3회 제한' 을 대체한다. 횟수로 끊으면 방을 다 봤는지와
-        # 무관하게 나가버려, 남은 조각을 지우러 다시 오느라 재수색이 길어졌다.
-        #
-        # 값은 큰 월드(56x40m, 조난자 7명)에서 네 값을 재서 정했다.
-        #   90초  6/7  오탐 0
-        #   120초 6/7  오탐 0
-        #   180초 6/7  오탐 1
-        #   240초 7/7  오탐 0  ← 전원 발견 57분
-        # '오래 머물면 느려서 손해' 일 것 같지만 반대였다. 덜 보고 나가면
-        # 남은 조각을 지우러 다시 오는 비용이 더 크다.
-        self.declare_parameter('room_clear_budget_s', 240.0)
         # 사각지대(벽 모서리·장애물 뒤)는 여유가 안 나오므로 낮게 잡는다
         self.declare_parameter('visual_clearance', 0.45)
         # 목표 도착 후 그 자리에서 포탑이 훑을 시간(초). 바로 다음 목표로
@@ -219,6 +235,8 @@ class PatrolNavigator(Node):
         self.explore_speed     = float(self.get_parameter('explore_assumed_speed').value)
         self.explore_tmo_max   = float(self.get_parameter('explore_goal_timeout_max').value)
         self.far_goal_min_dist = float(self.get_parameter('far_goal_min_dist').value)
+        self.goal_dist_penalty = float(self.get_parameter('goal_dist_penalty').value)
+        self.frontier_view_r   = float(self.get_parameter('frontier_view_r').value)
         self.approach_ring_n   = int(self.get_parameter('approach_ring_n').value)
         self._explore_budget   = self.explore_timeout   # 현재 goal 의 제한시간(초)
         self.stuck_confirm_s   = float(self.get_parameter('stuck_confirm_s').value)
@@ -231,9 +249,7 @@ class PatrolNavigator(Node):
         self.cam_range         = float(self.get_parameter('cam_see_range').value)
         self.cam_fov           = float(self.get_parameter('cam_fov_rad').value)
         self.visual_min        = int(self.get_parameter('visual_min_size').value)
-        self.sweep_first_r     = float(self.get_parameter('sweep_first_radius').value)
         self.visual_min_local  = int(self.get_parameter('visual_min_local').value)
-        self.room_clear_budget = float(self.get_parameter('room_clear_budget_s').value)
         self.visual_clearance  = float(self.get_parameter('visual_clearance').value)
         self.dwell_s           = float(self.get_parameter('arrive_dwell_s').value)
         self.min_goals_for_sweep = int(self.get_parameter('min_goals_for_sweep').value)
@@ -259,6 +275,7 @@ class PatrolNavigator(Node):
         self._manual_goal = None              # (x,y)
         self._manual_start = None             # MANUAL 진입 시각(초)
         self._far_lock = False                # 원거리 이탈 목표를 붙드는 중
+        self._pause_t0 = None                 # 조사/경보로 멈춘 시각
         self._fire_pos = None                 # 현재 경보 대상 (x,y)
         self._alarm_start = None              # 경보 시작 시각(sec)
         self._wp_sent_t = None                # 현재 WP goal 발행 시각(sec)
@@ -270,8 +287,6 @@ class PatrolNavigator(Node):
         self._frontier_src = None             # 그 goal 을 만든 프론티어 중심 (중복 판정용)
         self._frontier_t = 0.0                # 마지막 목표 선정 시각
         self._dwell_until = None              # 도착 후 훑기 종료 시각
-        self._local_anchor = None             # 현재 마무리 중인 구역의 기준점
-        self._local_since = 0.0               # 그 구역에 들어온 시각(초)
         self._goals_done = 0                  # 실제로 도달한 목표 수
         self._visited_frontiers: list[tuple] = []
         self._explore_done = False
@@ -383,6 +398,7 @@ class PatrolNavigator(Node):
         rx, ry = self._robot_pose()
         self._inspect_pos = (tx, ty)
         self._inspect_start = self._now()
+        self._pause_t0 = self._inspect_start      # 가려던 목표를 되살리기 위함
         self._state_before_inspect = self.state
         self.state = INSPECT
         self._approach_arrived = False
@@ -657,6 +673,7 @@ class PatrolNavigator(Node):
         self._alarmed_fires.append((fx, fy))
         self._fire_pos = (fx, fy)
         self._alarm_start = self._now()
+        self._pause_t0 = self._alarm_start       # 가려던 목표를 되살리기 위함
         self.state = FIRE_ALARM
         self.get_logger().warn(
             f'🚨 화재 경보! ({fx:.1f}, {fy:.1f}) — 순찰 정지, 포탑 조준')
@@ -915,52 +932,24 @@ class PatrolNavigator(Node):
         프론티어 중심은 정의상 미탐사 경계라 그대로 goal 로 쓰면 벽에 붙거나
         미탐사 셀에 놓여 Nav2 가 도달 실패 → 복구 → 벽으로 밀고 드는 일이
         반복된다. 로봇 쪽으로 당겨 자유공간에 놓은 점을 goal 로 쓴다.
+
+        예전에는 '반경 sweep_first_r 안의 미관측' 을 먼저 처리하고, 그게
+        없을 때만 멀리 나갔다. 그 반경 필터가 문제였다 — 점수식은 이미
+        큰 덩어리를 선호하는데, 필터가 비교 대상 자체를 눈앞으로 제한해
+        점수식을 무력화했다. 그래서 목표가 1.4~4.3m 잔걸음이 되고 방
+        하나를 자투리 단위로 갉아먹느라 다른 방으로 넘어가질 못했다
+        (실측: 25.6m 목표를 세 번 재발행하고도 24초에 1.1m 전진).
+
+        지금은 두 후보를 한 저울에 올려 전 지도에서 고른다. 단위가 다른
+        n 을 넓이로 환산하는 몫은 goal_score 가 맡는다.
         """
-        # 지금 있는 방부터 다 훑고 나간다.
-        # 미관측 구역을 '라이다 프론티어가 전부 없어진 뒤' 로 미루면, 방이
-        # 여러 개인 건물에서는 라이다 프론티어가 계속 남아 있어서 로봇이
-        # 들어간 방의 사각지대를 안 보고 다음 방으로 떠나버린다.
-        # → 반경 sweep_first_r 안에 안 본 구역이 있으면 그것부터 처리한다.
-        # 방 안을 마무리할 때는 작은 조각까지 목표로 삼는다.
-        near = [c for c in self._find_visual_frontiers(self.visual_min_local)
-                if math.hypot(c[0] - rx, c[1] - ry) <= self.sweep_first_r]
-        now = self._now()
+        cands = ([(fx, fy, n, 'frontier') for fx, fy, n in self._find_frontiers()]
+                 + [(fx, fy, n, 'visual')
+                    for fx, fy, n in self._find_visual_frontiers(
+                        self.visual_min_local)])
 
-        # '들어간 방은 다 보고 나간다'.
-        # 예전에는 연속 3회만 주변을 훑고 무조건 밖으로 나갔다. 그래서 방을
-        # 다 못 본 채 떠나고, 남은 조각을 지우러 나중에 다시 오느라 재수색이
-        # 길어졌다. 이제는 주변에 안 본 곳이 있으면 계속 훑는다.
-        # 다만 한 구역에 영원히 갇히면 안 되므로 시간 예산을 둔다
-        # (예전 3회 제한은 이 목적이었으나, 방을 다 봤는지와 무관해서
-        #  '덜 보고 나가는' 부작용이 컸다).
-        if near:
-            anchor_far = (self._local_anchor is None
-                          or math.hypot(rx - self._local_anchor[0],
-                                        ry - self._local_anchor[1])
-                          > self.sweep_first_r * 1.5)
-            if anchor_far:                      # 새 구역에 들어왔다
-                self._local_anchor = (rx, ry)
-                self._local_since = now
-            if now - self._local_since <= self.room_clear_budget:
-                cands, kind = near, '방 안 미관측(마무리)'
-            else:                               # 예산 초과 → 일단 나갔다 온다
-                self._local_anchor = None
-                cands = self._find_frontiers()
-                kind = '미탐사 경계(구역 예산 초과)'
-                if not cands:
-                    cands = self._find_visual_frontiers()
-                    kind = '미관측 구역'
-        else:
-            self._local_anchor = None
-            cands = self._find_frontiers()
-            kind = '미탐사 경계'
-            if not cands:
-                cands = self._find_visual_frontiers()
-                kind = '미관측 구역'
-        self._last_goal_kind = kind
-
-        best, best_score = None, -1e9
-        for fx, fy, n in cands:
+        best, best_score, best_kind = None, -1e9, None
+        for fx, fy, n, kind in cands:
             # 중복 판정은 반드시 '프론티어 중심' 기준. 당겨진 goal 로 비교하면
             # 같은 프론티어가 매번 새 후보로 통과해 무한 재선택된다.
             if any(math.hypot(fx - vx, fy - vy) < 1.5
@@ -972,19 +961,25 @@ class PatrolNavigator(Node):
             # 사각지대는 벽 모서리·장애물 뒤라 사방 0.7m 여유 조건에 걸려
             # 후보에서 통째로 빠졌다. 미관측 목표는 여유를 낮춰 접근을 허용한다.
             # (그래도 Nav2 inflation 때문에 못 가면 타임아웃으로 걸러진다)
-            clr = (self.visual_clearance if kind != '미탐사 경계'
-                   else self.goal_clearance)
+            clr = (self.goal_clearance if kind == 'frontier'
+                   else self.visual_clearance)
             goal = self._pull_back(fx, fy, rx, ry, self.frontier_standoff, clr)
             if goal is None:
                 continue           # 접근 가능한 자유공간을 못 찾음 → 건너뜀
             # 당긴 결과가 로봇 코앞이면 도착 판정이 즉시 서서 제자리걸음이 된다
             if math.hypot(goal[0] - rx, goal[1] - ry) < self.frontier_reach:
                 continue
-            # 크기는 이득, 거리는 비용
-            score = n * 0.5 - d
+            score = goal_score(kind, n, d, self._map_res(),
+                               self.frontier_view_r, self.goal_dist_penalty)
             if score > best_score:
-                best_score, best = score, (goal, (fx, fy))
+                best_score, best, best_kind = score, (goal, (fx, fy)), kind
+        self._last_goal_kind = ('미탐사 경계' if best_kind == 'frontier'
+                                else '미관측 구역')
         return best
+
+    def _map_res(self):
+        """지도 해상도(m/셀). 지도가 아직 없으면 표준값."""
+        return self._map_msg.info.resolution if self._map_msg else 0.05
 
     def _pick_far_goal(self, rx, ry):
         """지역 루프 탈출용 — 거리 벌점 없이 '가장 큰 미관측 덩어리'로 간다.
@@ -1221,10 +1216,15 @@ class PatrolNavigator(Node):
         reached  = goal is not None and math.hypot(goal[0]-rx, goal[1]-ry) < self.frontier_reach
         timedout = (self._wp_sent_t is not None
                     and now - self._wp_sent_t > self._explore_budget)
-        # 원거리 이탈 목표는 도착/시간초과 전까지 붙든다.
+        # 한 번 고른 목표는 도착/시간초과 전까지 붙든다.
         # 안 그러면 frontier_replan(6초)마다 재선정이 돌면서 가까운 후보가
         # 다시 뽑혀, 먼 목표에 닿기도 전에 취소된다. 실측으로 로봇이
         # 19m 떨어진 두 지점을 왕복만 했다(원거리 이탈 125회, 도달 0회).
+        #
+        # 예전에는 이 붙듦이 '원거리 이탈' 목표에만 걸렸다. 지금은 목표를
+        # 전 지도에서 고르므로 어느 목표든 멀 수 있어 전부에 건다.
+        # 대가: 가려던 곳이 이동 중에 우연히 관측돼도 일단 간다. 시간초과
+        # 상한(explore_goal_timeout_max)이 그 낭비를 막는다.
         if self._far_lock:
             if reached or timedout:
                 self._far_lock = False
@@ -1346,6 +1346,7 @@ class PatrolNavigator(Node):
             return
         self._send_goal(nxt[0], nxt[1])
         self._wp_sent_t = now
+        self._far_lock = True           # 도착/시간초과까지 이 목표를 붙든다
         # 먼 목표일수록 시간을 더 준다 (직선거리 기준, 경로는 더 길므로 넉넉히)
         gd = math.hypot(nxt[0] - rx, nxt[1] - ry)
         self._explore_budget = min(self.explore_tmo_max,
@@ -1362,14 +1363,41 @@ class PatrolNavigator(Node):
         self.get_logger().info(f'{reason} WP{self.wp_idx} ({wx:.1f},{wy:.1f})')
 
     def _resume_patrol(self):
+        """조사·경보가 끝나고 순찰로 돌아온다.
+
+        예전에는 여기서 탐사 목표를 통째로 버렸다(`_frontier_goal = None`,
+        `_far_lock = False`). 그래서 유령 후보 하나마다 로봇이 어디 가려던
+        건지를 잊었다. 유령은 런당 21~24건이고, 실측으로 25.6m 목표를 세 번
+        재발행하고도 24초 동안 1.1m 밖에 못 갔다 — 복도에서 멍 때리는 것처럼
+        보이던 것의 정체다.
+
+        이제는 가려던 목표를 되살린다. 조사에 쓴 시간만큼 제한시간을 미뤄
+        주는 게 중요하다. 안 그러면 조사 시간이 주행 예산을 깎아 목표가
+        엉뚱하게 시간초과된다.
+        """
         self.state = PATROL
-        if self.patrol_mode == 'explore':
-            self._frontier_goal = None      # 다음 tick에서 새 목표 선정
-            self._wp_sent_t = None
-            self._far_lock = False          # 조사/경보로 끊겼으면 이탈도 무효
-            self.get_logger().info('순찰 재개 — 탐사 목표 재선정')
-        else:
+        if self.patrol_mode != 'explore':
             self._goto_current_wp('순찰 재개')
+            return
+
+        goal = self._frontier_goal
+        if goal is None:
+            self._wp_sent_t = None
+            self._far_lock = False
+            self.get_logger().info('순찰 재개 — 탐사 목표 재선정')
+            return
+
+        paused = 0.0
+        if self._pause_t0 is not None:
+            paused = max(0.0, self._now() - self._pause_t0)
+            self._pause_t0 = None
+        if self._wp_sent_t is not None:
+            self._wp_sent_t += paused       # 멈춰 있던 시간은 주행 예산에서 뺀다
+        # 정지 명령으로 Nav2 목표가 덮였으므로 같은 목표를 다시 보낸다
+        self._send_goal(goal[0], goal[1])
+        self.get_logger().info(
+            f'순찰 재개 — 가려던 목표 ({goal[0]:.1f}, {goal[1]:.1f}) 복귀 '
+            f'(조사에 {paused:.0f}s 소요, 제한시간 그만큼 연장)')
 
     # ── 시각화 ───────────────────────────────────────────────────────
     def _publish_markers(self):
