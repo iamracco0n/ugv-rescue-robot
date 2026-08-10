@@ -25,8 +25,9 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
-                            TimerAction)
+from launch.actions import (DeclareLaunchArgument, GroupAction,
+                            IncludeLaunchDescription, TimerAction)
+from launch_ros.actions import PushRosNamespace
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (LaunchConfiguration, PathJoinSubstitution,
@@ -148,18 +149,27 @@ def generate_launch_description():
 
         # Nav2 — 프레임 이름을 로봇별로 바꿔 끼운다. 안 바꾸면 두 스택이
         # 같은 base_footprint 를 찾아 서로의 로봇을 제어한다.
+        #
+        # ★ PushRosNamespace 로 감싸야 한다. Humble 의 navigation_launch.py 는
+        #   namespace 인자를 '파라미터 파일의 최상위 키' 로만 쓰고 노드에는
+        #   씌우지 않는다(GroupAction 안에 PushRosNamespace 가 없다).
+        #   그냥 include 하면 노드가 /controller_server 로 떠서 ugv1: 아래
+        #   파라미터를 못 읽고 'No critics defined for FollowPath' 로 죽는다.
         actions.append(TimerAction(period=22.0 + i * 4.0, actions=[
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    os.path.join(pkg_nav2, 'launch', 'navigation_launch.py')),
-                launch_arguments={
-                    'namespace': name,
-                    'use_namespace': 'True',
-                    'use_sim_time': 'true',
-                    'params_file': namespaced_nav2_params(
-                        nav2_params, prefix,
-                        os.path.join('/tmp', f'nav2_{name}.yaml')),
-                    'slam': 'True',
-                }.items())]))
+            GroupAction([
+                PushRosNamespace(name),
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(
+                        os.path.join(pkg_nav2, 'launch',
+                                     'navigation_launch.py')),
+                    launch_arguments={
+                        'namespace': name,
+                        'use_sim_time': 'true',
+                        'params_file': namespaced_nav2_params(
+                            nav2_params, prefix,
+                            os.path.join('/tmp', f'nav2_{name}.yaml')),
+                        'slam': 'True',
+                    }.items()),
+            ])]))
 
     return LaunchDescription(actions)

@@ -57,9 +57,13 @@ def _robot(context, *args, **kwargs):
         f'/{p}camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
         f'/{p}thermal/image_raw@sensor_msgs/msg/Image[gz.msgs.Image',
     ]
+    # TF 는 로봇마다 따로 둔다(/ugv1/tf). Nav2 가 이미 그 전제로 /tf → tf
+    # 리매핑을 하고 있어, 거스르는 것보다 따르는 편이 낫다. 1대 구성에서는
+    # 네임스페이스가 비어 지금까지처럼 /tf 하나만 쓴다.
+    tf_topic = f'/{name}/tf' if ns else '/tf'
     # 비전 노드가 RealSense 이름을 기대하므로 그대로 맞춰준다.
     remaps = [
-        (f'/model/{p}ugv/tf', '/tf'),
+        (f'/model/{p}ugv/tf', tf_topic),
         (f'/{p}camera/image',
          f'/{p}camera/camera/color/image_raw'),
         (f'/{p}camera/depth_image',
