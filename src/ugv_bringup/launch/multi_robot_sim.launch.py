@@ -176,21 +176,21 @@ def generate_launch_description():
             ])]))
 
     # ── 2단계: 공용 map 프레임과 지도 병합 ───────────────────────────
-    # 각 로봇의 map 프레임 원점은 그 로봇이 출발한 자리다(slam_toolbox 규약).
-    # 스폰 위치를 우리가 정하므로 오프셋을 이미 안다 → 정렬 탐색이 필요 없다.
-    # 첫 로봇의 map 을 공용 map 으로 삼고 나머지를 그만큼 밀어 붙인다.
+    # 두 지도는 이미 같은 원점을 쓴다. gz 의 OdometryPublisher 가 월드 원점
+    # 기준으로 odom 을 내기 때문이다(실측: 스폰 (0,0.8) 인 로봇의 첫 odom 이
+    # (0,0.8)). 그래서 map → ugvN/map 은 항등이고 병합 오프셋도 0 이다.
+    # 스폰 좌표 차를 넣었다가 한쪽 벽의 99.2% 가 상대 지도의 자유공간에
+    # 떨어졌다.
     #
     # Nav2 는 건드리지 않는다. 각자 자기 map 프레임에서 계속 계획하고,
     # 공용 지도는 '어디를 탐사할지' 를 정하는 순찰 노드만 쓴다. 목표는
     # map 프레임으로 나가고 Nav2 가 자기 프레임으로 변환해 받는다.
     # 이렇게 두면 1단계에서 검증된 Nav2 구성을 흔들지 않는다.
-    x0, y0 = float(ROBOTS[0]['x']), float(ROBOTS[0]['y'])
     for r in ROBOTS:
-        dx, dy = float(r['x']) - x0, float(r['y']) - y0
         actions.append(Node(
             package='tf2_ros', executable='static_transform_publisher',
             name=f"map_to_{r['name']}",
-            arguments=['--x', str(dx), '--y', str(dy),
+            arguments=['--x', '0', '--y', '0',
                        '--frame-id', 'map',
                        '--child-frame-id', f"{r['name']}/map"],
             parameters=[{'use_sim_time': True}], output='screen'))
@@ -201,8 +201,8 @@ def generate_launch_description():
              parameters=[{
                  'use_sim_time': True,
                  'robots': [r['name'] for r in ROBOTS],
-                 'spawn_x': [float(r['x']) for r in ROBOTS],
-                 'spawn_y': [float(r['y']) for r in ROBOTS],
+                 'offset_x': [0.0 for _ in ROBOTS],
+                 'offset_y': [0.0 for _ in ROBOTS],
              }], output='screen')]))
 
     # 비전·순찰 — Nav2 lifecycle 활성화가 끝난 뒤에 띄운다. 먼저 띄우면

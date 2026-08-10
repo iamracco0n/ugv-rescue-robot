@@ -4,13 +4,17 @@
 
 왜 정렬을 탐색하지 않나
 -----------------------
-두 로봇의 스폰 위치를 우리가 정하므로 두 map 프레임의 오프셋을 이미 안다.
-일반적인 다중로봇 지도 병합은 겹치는 부분을 찾아 정합해야 하지만, 시뮬에서는
-그럴 이유가 없다. 알려진 오프셋으로 그대로 겹친다.
+일반적인 다중로봇 지도 병합은 겹치는 부분을 찾아 정합해야 한다. 여기서는
+그럴 이유가 없다 — 두 지도가 이미 같은 원점을 쓴다.
 
-각 로봇의 map 프레임 원점은 그 로봇이 출발한 자리다(slam_toolbox 규약).
-그래서 기준 로봇의 map 을 공용 map 으로 삼고, 나머지는 스폰 좌표 차이만큼
-밀어서 얹는다.
+gz 의 OdometryPublisher 가 월드 원점 기준으로 odom 을 내기 때문이다
+(실측: 스폰 (0,0.8) 인 로봇의 첫 odom 이 (0,0.8) 로 나온다). 그래서 두
+로봇의 SLAM 지도가 같은 좌표계에 놓인다.
+
+처음엔 'map 프레임 원점은 로봇이 출발한 자리' 라고 보고 스폰 좌표 차를
+오프셋으로 넣었는데, 그게 오히려 어긋나게 만들었다 — 한쪽이 벽이라고 본
+칸의 99.2% 가 상대 지도에서는 자유공간에 떨어졌다. 오프셋은 0 이 맞다.
+파라미터는 남겨 둔다(스폰 방식이 바뀌면 필요해진다).
 
 겹치는 규칙은 tools/test_map_merge.py 에 고정해 두었다.
   점유가 이기고 미탐사가 진다. 안 그러면 늦게 온 로봇의 미탐사가 먼저 만든
@@ -45,24 +49,28 @@ class MapMerge(Node):
     def __init__(self):
         super().__init__('map_merge_node')
         self.declare_parameter('robots', ['ugv1', 'ugv2'])
-        # 각 로봇의 스폰 좌표. robots 와 같은 순서로 x, y 를 나열한다.
-        # 첫 로봇이 기준이 되어 공용 map 원점을 정한다.
-        self.declare_parameter('spawn_x', [0.0, 0.0])
-        self.declare_parameter('spawn_y', [0.8, -0.8])
+        # 각 로봇 지도를 공용 프레임으로 옮길 때 더할 오프셋(m).
+        # robots 와 같은 순서.
+        #
+        # ★ 보통은 0 이다. gz 의 OdometryPublisher 가 월드 원점 기준으로
+        #   odom 을 내기 때문에(실측: 스폰 (0,0.8) 인 로봇의 첫 odom 이
+        #   (0,0.8)), 두 로봇의 SLAM 지도가 이미 같은 원점을 공유한다.
+        #   여기에 스폰 좌표 차를 넣으면 오히려 어긋난다 — 실제로 그렇게
+        #   했다가 한쪽 벽의 99.2% 가 상대 지도에서 자유공간에 떨어졌다.
+        self.declare_parameter('offset_x', [0.0, 0.0])
+        self.declare_parameter('offset_y', [0.0, 0.0])
         self.declare_parameter('publish_period_s', 2.0)
         self.declare_parameter('map_frame', 'map')
 
         self.robots = list(self.get_parameter('robots').value)
-        sx = list(self.get_parameter('spawn_x').value)
-        sy = list(self.get_parameter('spawn_y').value)
+        sx = list(self.get_parameter('offset_x').value)
+        sy = list(self.get_parameter('offset_y').value)
         self.map_frame = self.get_parameter('map_frame').value
 
         if not (len(self.robots) == len(sx) == len(sy)):
-            raise SystemExit('robots / spawn_x / spawn_y 길이가 다르다')
+            raise SystemExit('robots / offset_x / offset_y 길이가 다르다')
 
-        # 기준 로봇 대비 오프셋(m). 기준 자신은 (0,0).
-        self.offset = {r: (sx[i] - sx[0], sy[i] - sy[0])
-                       for i, r in enumerate(self.robots)}
+        self.offset = {r: (sx[i], sy[i]) for i, r in enumerate(self.robots)}
         self.grids: dict[str, OccupancyGrid] = {}
 
         latched = QoSProfile(depth=1,
