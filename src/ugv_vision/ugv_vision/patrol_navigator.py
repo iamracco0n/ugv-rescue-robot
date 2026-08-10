@@ -249,6 +249,15 @@ class PatrolNavigator(Node):
         self.declare_parameter('peer_claim_radius', 6.0)
         # 두 로봇의 등록을 같은 사람으로 볼 거리(m).
         self.declare_parameter('victim_merge_r', 1.5)
+        # 탐사 목표를 이 사각형 안으로 제한한다 [xmin, ymin, xmax, ymax].
+        # 비우면 제한 없음.
+        #
+        # ★ 이 로봇은 collision 이 없다(URDF 주석 참조 — 기구학 구동이라
+        #   충돌체가 오히려 로봇을 튕겨낸다). 그래서 코스트맵에 벽이 안 찍힌
+        #   틈이 있으면 벽을 그냥 통과한다. 실측으로 로봇이 x=-34~-36 에서
+        #   관측됐는데 큰 월드 외벽은 x=+-28 이다. 건물 밖으로 나간 것이다.
+        #   밖에는 볼 것도 없고 지도도 안 생겨 시간만 버린다.
+        self.declare_parameter('explore_bounds', [0.0, 0.0, 0.0, 0.0])
         self.declare_parameter('goal_dist_penalty', 0.5)
         # 라이다 경계를 넘었을 때 새로 보이는 깊이(m). 경계 '길이' 를
         # 넓이로 환산할 때 쓴다.
@@ -350,6 +359,9 @@ class PatrolNavigator(Node):
             self.peers = []
         self.peer_claim_r = float(self.get_parameter('peer_claim_radius').value)
         self.victim_merge_r = float(self.get_parameter('victim_merge_r').value)
+        b = list(self.get_parameter('explore_bounds').value)
+        # 넷이 다 0 이면 제한 없음으로 본다.
+        self.explore_bounds = b if len(b) == 4 and any(b) else None
         self.goal_dist_penalty = float(self.get_parameter('goal_dist_penalty').value)
         self.frontier_view_r   = float(self.get_parameter('frontier_view_r').value)
         self.approach_ring_n   = int(self.get_parameter('approach_ring_n').value)
@@ -494,6 +506,11 @@ class PatrolNavigator(Node):
             self.create_subscription(
                 MarkerArray, f'/{peer}/patient_markers',
                 lambda m, p=peer: self.victims_cb(m, p), 10)
+            # 화재도 합친다. fire_seen_cb 가 이미 2m 안이면 같은 불로 묶으므로
+            # 받기만 하면 중복이 안 생긴다. 안 받으면 두 로봇이 같은 불을
+            # 각각 세어 정답(4건)보다 많이 보고한다(실측 6/4).
+            self.create_subscription(
+                PointStamped, f'/{peer}/fire_alert', self.fire_seen_cb, 10)
         if self.peers:
             self.get_logger().info(f'팀 수색 — 동료 {", ".join(self.peers)}')
 
@@ -1172,6 +1189,10 @@ class PatrolNavigator(Node):
             # 과 (0.1,11.9) 를 각각 잡았다).
             if claimed_by_peer(fx, fy, self._peer_goals, self.peer_claim_r):
                 continue
+            if self.explore_bounds is not None:
+                x0, y0, x1, y1 = self.explore_bounds
+                if not (x0 <= fx <= x1 and y0 <= fy <= y1):
+                    continue          # 건물 밖 — 볼 것도 없고 지도도 안 생긴다
             score = goal_score(kind, n, d, self._map_res(),
                                self.frontier_view_r, self.goal_dist_penalty)
             if score > best_score:

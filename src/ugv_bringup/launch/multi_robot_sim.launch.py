@@ -259,6 +259,10 @@ def generate_launch_description():
                  parameters=[{'use_sim_time': True,
                               'map_frame': 'map',
                               'base_frame': f'{prefix}base_footprint',
+                              # 큰 월드 외벽은 x=+-28, y=+-20. 로봇에
+                              # collision 이 없어 코스트맵 틈으로 벽을
+                              # 통과할 수 있으므로 목표를 안쪽으로 묶는다.
+                              'explore_bounds': [-27.0, -19.0, 27.0, 19.0],
                               # 3단계: 동료의 목표·관측·명부를 받는다
                               'peers': [o['name'] for o in robots
                                         if o['name'] != name] or [''],
