@@ -201,10 +201,18 @@ def generate_launch_description():
     # 공용 지도는 '어디를 탐사할지' 를 정하는 순찰 노드만 쓴다. 목표는
     # map 프레임으로 나가고 Nav2 가 자기 프레임으로 변환해 받는다.
     # 이렇게 두면 1단계에서 검증된 Nav2 구성을 흔들지 않는다.
+    #
+    # ★ 이 정적 변환은 반드시 그 로봇의 네임스페이스 tf 로 나가야 한다.
+    #   전역 /tf_static 에 내면 네임스페이스 노드들이 /ugvN/tf_static 만
+    #   보므로 이 변환이 안 보이고, Nav2 가 map 프레임 목표를 자기 프레임으로
+    #   변환하지 못해 모든 목표가 실패한다.
+    #   실측: 1대만 돌려도 목표 11회 중 10회 도달 실패.
+    #   robot_state_publisher, tf2 리스너에 이은 세 번째 같은 함정이다.
     for r in robots:
         actions.append(Node(
             package='tf2_ros', executable='static_transform_publisher',
-            name=f"map_to_{r['name']}",
+            name=f"map_to_{r['name']}", namespace=r['name'],
+            remappings=[('/tf', 'tf'), ('/tf_static', 'tf_static')],
             arguments=['--x', '0', '--y', '0',
                        '--frame-id', 'map',
                        '--child-frame-id', f"{r['name']}/map"],
