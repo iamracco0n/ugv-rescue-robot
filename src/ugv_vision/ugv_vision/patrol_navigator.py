@@ -133,6 +133,12 @@ class PatrolNavigator(Node):
 
         # ── 파라미터 ─────────────────────────────────────────────────
         # 순찰 웨이포인트: 메인홀 → RoomA → RoomB → RoomD → RoomC → (반복)
+        # 로봇이 둘이면 프레임이 ugv1/map, ugv2/map 으로 갈린다.
+        # 기본값은 1대 구성과 같다.
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.map_frame  = self.get_parameter('map_frame').value
+        self.base_frame = self.get_parameter('base_frame').value
         self.declare_parameter('waypoints_x', [0.0, -9.0,  9.0,  9.0, -9.0])
         self.declare_parameter('waypoints_y', [0.0,  7.0,  7.0, -7.0, -7.0])
         self.declare_parameter('reach_dist', 0.6)
@@ -348,38 +354,38 @@ class PatrolNavigator(Node):
         self._tf_listener = tf2_ros.TransformListener(self._tf_buf, self)
 
         # ── 구독 ─────────────────────────────────────────────────────
-        self.create_subscription(Odometry,     '/odom',        self.odom_cb,   10)
-        self.create_subscription(OccupancyGrid, '/map',        self.map_cb,    1)
-        self.create_subscription(PoseStamped,   '/goal_pose',  self.goal_echo_cb, 10)
-        self.create_subscription(PointStamped,  '/fire_alert', self.fire_cb,   10)
-        self.create_subscription(Bool,          '/patrol_enable', self.enable_cb, 10)
+        self.create_subscription(Odometry,     'odom',        self.odom_cb,   10)
+        self.create_subscription(OccupancyGrid, 'map',        self.map_cb,    1)
+        self.create_subscription(PoseStamped,   'goal_pose',  self.goal_echo_cb, 10)
+        self.create_subscription(PointStamped,  'fire_alert', self.fire_cb,   10)
+        self.create_subscription(Bool,          'patrol_enable', self.enable_cb, 10)
         # 조난자 확인 핸드셰이크 (target_manager_node)
-        self.create_subscription(PointStamped, '/inspect_request', self.inspect_req_cb,  10)
-        self.create_subscription(Bool,         '/inspect_done',    self.inspect_done_cb, 10)
+        self.create_subscription(PointStamped, 'inspect_request', self.inspect_req_cb,  10)
+        self.create_subscription(Bool,         'inspect_done',    self.inspect_done_cb, 10)
         # 열원 확인 핸드셰이크 (fire_detection_node) — 조난자와 같은 흐름,
         # 다만 불에는 너무 가까이 붙지 않도록 standoff 를 따로 둔다
-        self.create_subscription(PointStamped, '/fire_candidate',    self.fire_cand_cb, 10)
+        self.create_subscription(PointStamped, 'fire_candidate',    self.fire_cand_cb, 10)
         # 카메라가 어디를 보는지 알아야 시야 커버리지를 칠할 수 있다
-        self.create_subscription(JointState, '/joint_states', self.joint_cb, 10)
+        self.create_subscription(JointState, 'joint_states', self.joint_cb, 10)
         # 수색 결과 요약 보고용 — 확정된 조난자·화재 목록
-        self.create_subscription(MarkerArray,  '/patient_markers', self.victims_cb, 10)
-        self.create_subscription(PointStamped, '/fire_alert',      self.fire_seen_cb, 10)
-        self.create_subscription(Bool,         '/fire_inspect_done', self.inspect_done_cb, 10)
+        self.create_subscription(MarkerArray,  'patient_markers', self.victims_cb, 10)
+        self.create_subscription(PointStamped, 'fire_alert',      self.fire_seen_cb, 10)
+        self.create_subscription(Bool,         'fire_inspect_done', self.inspect_done_cb, 10)
 
         # ── 발행 ─────────────────────────────────────────────────────
-        self.goal_pub   = self.create_publisher(PoseStamped, '/goal_pose',      10)
-        self.aim_pub    = self.create_publisher(Point,       '/apex_aim_point', 10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/patrol_markers', 10)
+        self.goal_pub   = self.create_publisher(PoseStamped, 'goal_pose',      10)
+        self.aim_pub    = self.create_publisher(Point,       'apex_aim_point', 10)
+        self.marker_pub = self.create_publisher(MarkerArray, 'patrol_markers', 10)
         # 장애물 탈출용 — 로봇이 장애물 안에 들어가면 Nav2 는 시작 자세가
         # 무효라 경로를 못 낸다. 그때만 직접 후진 명령을 낸다.
-        self.cmd_pub    = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_pub    = self.create_publisher(Twist, 'cmd_vel', 10)
         # 한 바퀴 수색 완료 신호
-        self.sweep_pub  = self.create_publisher(Bool, '/sweep_complete', 10)
+        self.sweep_pub  = self.create_publisher(Bool, 'sweep_complete', 10)
         # 카메라로 실제 훑은 구역 / 아직 못 본 구역을 눈으로 구분하기 위한 격자.
         # SLAM 맵은 '라이다가 지나갔나' 만 보여주므로, 방을 통과만 하고 구석을
         # 안 본 경우가 지도상으로는 멀쩡해 보인다. 로그의 '미관측 279m²' 가
         # 어디를 말하는지 화면에서 볼 수 없었다.
-        self.cover_pub  = self.create_publisher(OccupancyGrid, '/coverage_map', 1)
+        self.cover_pub  = self.create_publisher(OccupancyGrid, 'coverage_map', 1)
 
         self.create_timer(0.5, self.tick)     # 2 Hz FSM
         # 탈출 명령은 20Hz 로 낸다. Nav2 컨트롤러도 /cmd_vel 에 20Hz 로 0을
@@ -585,7 +591,7 @@ class PatrolNavigator(Node):
         else:
             out[free] = 55
         m = OccupancyGrid()
-        m.header.frame_id = 'map'
+        m.header.frame_id = self.map_frame
         m.header.stamp = self.get_clock().now().to_msg()
         m.info = g.info
         m.data = out.reshape(-1).tolist()
@@ -713,7 +719,7 @@ class PatrolNavigator(Node):
 
     def _robot_pose(self):
         try:
-            tf = self._tf_buf.lookup_transform('map', 'base_footprint', Time())
+            tf = self._tf_buf.lookup_transform(self.map_frame, self.base_frame, Time())
             t = tf.transform.translation
             return t.x, t.y
         except Exception:
@@ -728,7 +734,7 @@ class PatrolNavigator(Node):
         """
         try:
             q = self._tf_buf.lookup_transform(
-                'map', 'base_footprint', Time()).transform.rotation
+                self.map_frame, self.base_frame, Time()).transform.rotation
             return _yaw_from_quat(q)
         except Exception:
             return self.robot_theta
@@ -754,7 +760,7 @@ class PatrolNavigator(Node):
             rx, ry = self._robot_pose()
             yaw = math.atan2(y - ry, x - rx)
         g = PoseStamped()
-        g.header.frame_id = 'map'
+        g.header.frame_id = self.map_frame
         g.header.stamp = self.get_clock().now().to_msg()
         g.pose.position.x = float(x)
         g.pose.position.y = float(y)
@@ -1435,7 +1441,7 @@ class PatrolNavigator(Node):
         stamp = self.get_clock().now().to_msg()
         # 순찰 경로 라인 — 웨이포인트 모드에서만 (탐사 모드는 경로가 미리 없음)
         line = Marker()
-        line.header.frame_id = 'map'
+        line.header.frame_id = self.map_frame
         line.header.stamp = stamp
         line.ns = 'patrol_route'
         line.id = 0
@@ -1464,7 +1470,7 @@ class PatrolNavigator(Node):
         if cur_goal is not None:
             wx, wy = cur_goal
             cur = Marker()
-            cur.header.frame_id = 'map'
+            cur.header.frame_id = self.map_frame
             cur.header.stamp = stamp
             cur.ns = 'patrol_target'
             cur.id = 1
@@ -1481,7 +1487,7 @@ class PatrolNavigator(Node):
 
         # 화재 경보 배너
         banner = Marker()
-        banner.header.frame_id = 'map'
+        banner.header.frame_id = self.map_frame
         banner.header.stamp = stamp
         banner.ns = 'alarm_banner'
         banner.id = 2

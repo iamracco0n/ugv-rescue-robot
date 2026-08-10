@@ -127,21 +127,21 @@ class YoloPoseNode(Node):
         self._turret_pitch  = 0.0   # 어깨 높이 환산에 필요(카메라 상하 각)
         self.cam_fov        = _CAM_FOV
 
-        self.pub = self.create_publisher(TargetDetection, '/target_detection', 10)
+        self.pub = self.create_publisher(TargetDetection, 'target_detection', 10)
         # 감지 오버레이 이미지(사람 박스+골격+트리아지) → rqt_image_view / RViz Image
-        self.img_pub = self.create_publisher(Image, '/detection/image_annotated', 5)
+        self.img_pub = self.create_publisher(Image, 'detection/image_annotated', 5)
         # 로컬 OpenCV 창 표시 여부 (SSH/headless면 False 권장 — imshow 크래시 방지)
         self.declare_parameter('show_window', False)
         self.show_window = self.get_parameter('show_window').value
 
-        self.create_subscription(JointState, '/joint_states', self._joint_cb, 10)
+        self.create_subscription(JointState, 'joint_states', self._joint_cb, 10)
 
         # RGB + Depth 동기화 구독
         rgb_sub   = message_filters.Subscriber(
-            self, Image, '/camera/camera/color/image_raw',
+            self, Image, 'camera/camera/color/image_raw',
             qos_profile=qos_profile_sensor_data)
         depth_sub = message_filters.Subscriber(
-            self, Image, '/camera/camera/aligned_depth_to_color/image_raw',
+            self, Image, 'camera/camera/aligned_depth_to_color/image_raw',
             qos_profile=qos_profile_sensor_data)
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [rgb_sub, depth_sub], queue_size=10, slop=0.1)

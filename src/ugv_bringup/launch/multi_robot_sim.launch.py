@@ -33,6 +33,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (LaunchConfiguration, PathJoinSubstitution,
                                   TextSubstitution)
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 import yaml
 
@@ -173,5 +174,40 @@ def generate_launch_description():
                         'slam': 'True',
                     }.items()),
             ])]))
+
+    # 비전·순찰 — Nav2 lifecycle 활성화가 끝난 뒤에 띄운다. 먼저 띄우면
+    # torch/CUDA 로딩 CPU 스파이크가 lifecycle 전환과 겹쳐 스택이 죽는다.
+    for i, r in enumerate(ROBOTS):
+        name = r['name']
+        prefix = f'{name}/'
+        # TF 리스너는 절대 '/tf' 를 구독한다(tf2_ros 구현). 네임스페이스를
+        # 씌워도 안 따라오므로 상대 이름으로 되돌려야 /ugv1/tf 를 본다.
+        tf_remap = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
+        common = [{'use_sim_time': True,
+                   'map_frame': f'{prefix}map',
+                   'base_frame': f'{prefix}base_footprint'}]
+        actions.append(TimerAction(period=52.0 + i * 4.0, actions=[
+            Node(package='ugv_vision', executable='yolo_pose_node',
+                 name='yolo_pose_node', namespace=name,
+                 remappings=tf_remap,
+                 parameters=[{'use_sim_time': True}], output='screen'),
+            Node(package='ugv_vision', executable='target_manager_node',
+                 name='target_manager_node', namespace=name,
+                 remappings=tf_remap, parameters=common, output='screen'),
+            Node(package='ugv_vision', executable='fire_detection_node',
+                 name='fire_detection_node', namespace=name,
+                 remappings=tf_remap, parameters=common, output='screen'),
+            Node(package='ugv_vision', executable='patrol_navigator',
+                 name='patrol_navigator', namespace=name,
+                 remappings=tf_remap,
+                 parameters=common + [{
+                     'patrol_mode': 'explore',
+                     # 런치 인자는 문자열이라 그대로 주면 rclpy 가 STRING 으로
+                     # 추론해 INTEGER 파라미터와 안 맞고 노드가 즉시 죽는다.
+                     'expected_victims': ParameterValue(
+                         LaunchConfiguration('expected_victims'),
+                         value_type=int),
+                 }], output='screen'),
+        ]))
 
     return LaunchDescription(actions)

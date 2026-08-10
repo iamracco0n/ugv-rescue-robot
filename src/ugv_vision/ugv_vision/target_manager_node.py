@@ -109,23 +109,23 @@ class TargetManager(Node):
         super().__init__('target_manager_node')
 
         # ── 구독 ─────────────────────────────────────────────────────
-        self.create_subscription(TargetDetection, '/target_detection',  self.target_cb,        10)
-        self.create_subscription(Odometry,        '/odom',              self.odom_cb,           10)
-        self.create_subscription(Joy,             '/joy',               self.joy_cb,            10)
-        self.create_subscription(JointState,      '/joint_states',      self.joint_cb,          10)
-        self.create_subscription(JointState,      '/measured_joint_states', self.joint_cb,      10)
-        self.create_subscription(Point,           '/apex_aim_point',    self._apex_aim_cb,      10)
-        self.create_subscription(MarkerArray,     '/viz/blind_corners', self._blind_corners_cb, 10)
+        self.create_subscription(TargetDetection, 'target_detection',  self.target_cb,        10)
+        self.create_subscription(Odometry,        'odom',              self.odom_cb,           10)
+        self.create_subscription(Joy,             'joy',               self.joy_cb,            10)
+        self.create_subscription(JointState,      'joint_states',      self.joint_cb,          10)
+        self.create_subscription(JointState,      'measured_joint_states', self.joint_cb,      10)
+        self.create_subscription(Point,           'apex_aim_point',    self._apex_aim_cb,      10)
+        self.create_subscription(MarkerArray,     'viz/blind_corners', self._blind_corners_cb, 10)
 
         # ── 퍼블리시 ──────────────────────────────────────────────────
-        self.yaw_pub    = self.create_publisher(Float64,     '/turret_yaw_cmd',   10)
-        self.pitch_pub  = self.create_publisher(Float64,     '/turret_pitch_cmd', 10)
-        self.turret_pub = self.create_publisher(Vector3,     '/turret_cmd',       10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/patient_markers',  10)
-        self.arrow_pub  = self.create_publisher(Marker,      '/turret_heading',   10)
+        self.yaw_pub    = self.create_publisher(Float64,     'turret_yaw_cmd',   10)
+        self.pitch_pub  = self.create_publisher(Float64,     'turret_pitch_cmd', 10)
+        self.turret_pub = self.create_publisher(Vector3,     'turret_cmd',       10)
+        self.marker_pub = self.create_publisher(MarkerArray, 'patient_markers',  10)
+        self.arrow_pub  = self.create_publisher(Marker,      'turret_heading',   10)
         # 정지 조준 확인 핸드셰이크 — patrol_navigator 가 소비
-        self.inspect_req_pub  = self.create_publisher(PointStamped, '/inspect_request', 10)
-        self.inspect_done_pub = self.create_publisher(Bool,         '/inspect_done',    10)
+        self.inspect_req_pub  = self.create_publisher(PointStamped, 'inspect_request', 10)
+        self.inspect_done_pub = self.create_publisher(Bool,         'inspect_done',    10)
 
         # ── TF2 버퍼 (map → base_footprint 로봇 자세) ────────────────
         self._tf_buf = tf2_ros.Buffer(cache_time=Duration(seconds=30))
@@ -160,6 +160,12 @@ class TargetManager(Node):
         self._scan_update_t  = 0.0
 
         # 카메라 수평 FOV — 시뮬 1.089rad(62°) / 실기 D435i 87°
+        # 로봇이 둘이면 프레임이 ugv1/map, ugv2/map 으로 갈린다.
+        # 기본값은 1대 구성과 같다.
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.map_frame  = self.get_parameter('map_frame').value
+        self.base_frame = self.get_parameter('base_frame').value
         self.declare_parameter('cam_fov_rad', CAM_FOV_RAD)
         self.cam_fov = float(self.get_parameter('cam_fov_rad').value)
 
@@ -187,7 +193,7 @@ class TargetManager(Node):
         """map 프레임에서 로봇 자세(x, y, theta). TF 실패 시 odom 폴백."""
         try:
             tf = self._tf_buf.lookup_transform(
-                'map', 'base_footprint', rclpy.time.Time())
+                self.map_frame, self.base_frame, rclpy.time.Time())
             x = tf.transform.translation.x
             y = tf.transform.translation.y
             q = tf.transform.rotation
@@ -439,7 +445,7 @@ class TargetManager(Node):
 
     def _publish_inspect_request(self, gx, gy):
         p = PointStamped()
-        p.header.frame_id = 'map'
+        p.header.frame_id = self.map_frame
         p.header.stamp = self.get_clock().now().to_msg()
         p.point.x, p.point.y, p.point.z = float(gx), float(gy), 0.5
         self.inspect_req_pub.publish(p)
@@ -520,7 +526,7 @@ class TargetManager(Node):
 
     def _mk_sphere(self, pid, x, y, lv):
         m = Marker()
-        m.header.frame_id = 'map'; m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.map_frame; m.header.stamp = self.get_clock().now().to_msg()
         m.ns = 'patient_sphere'; m.id = pid * 3
         m.type = Marker.SPHERE; m.action = Marker.ADD
         m.pose.position.x = x; m.pose.position.y = y; m.pose.position.z = 0.3
@@ -533,7 +539,7 @@ class TargetManager(Node):
 
     def _mk_ring(self, pid, x, y, lv):
         m = Marker()
-        m.header.frame_id = 'map'; m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.map_frame; m.header.stamp = self.get_clock().now().to_msg()
         m.ns = 'patient_ring'; m.id = pid * 3 + 1
         m.type = Marker.CYLINDER; m.action = Marker.ADD
         m.pose.position.x = x; m.pose.position.y = y; m.pose.position.z = 0.05
@@ -546,7 +552,7 @@ class TargetManager(Node):
 
     def _mk_text(self, pid, x, y, lv, label):
         m = Marker()
-        m.header.frame_id = 'map'; m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.map_frame; m.header.stamp = self.get_clock().now().to_msg()
         m.ns = 'patient_text'; m.id = pid * 3 + 2
         m.type = Marker.TEXT_VIEW_FACING; m.action = Marker.ADD
         m.pose.position.x = x; m.pose.position.y = y; m.pose.position.z = 1.0
@@ -571,7 +577,7 @@ class TargetManager(Node):
         rx, ry, rtheta = self._map_frame_robot_pose()
         cam_angle = rtheta + self.turret_yaw
         m = Marker()
-        m.header.frame_id = 'map'; m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.map_frame; m.header.stamp = self.get_clock().now().to_msg()
         m.ns = 'turret_heading'; m.id = 0
         m.type = Marker.ARROW; m.action = Marker.ADD
         start = Point(); start.x = rx; start.y = ry; start.z = 0.5
