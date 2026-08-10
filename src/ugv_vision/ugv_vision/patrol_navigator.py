@@ -50,6 +50,29 @@ IDLE, PATROL, MANUAL, FIRE_ALARM = 'IDLE', 'PATROL', 'MANUAL', 'FIRE_ALARM'
 INSPECT = 'INSPECT'      # 조난자 후보 확인 — 정지 후 포탑 조준
 ESCAPE  = 'ESCAPE'       # 장애물 안에 박힘 — 후진으로 탈출
 
+def stuck_decision(ref, rx, ry, ryaw, now, eps_m, eps_rad, confirm_s):
+    """진전이 있었는지 보고 박힘을 판정한다.
+
+    반환: (박힘인가, 새 기준 또는 None)
+
+    회전도 진전으로 쳐야 한다. 예전에는 위치만 봤는데, 목표 방향이 크게
+    바뀌어 로봇이 제자리에서 180도 도는 동안에는 위치가 안 변하므로
+    '8초간 못 움직임' 으로 오판됐다. 그러면 후진 탈출이 돌아 방금 온 길을
+    되짚고, 다시 앞으로 가다 또 돌아서 — 앞뒤로 왕복만 하게 된다.
+    목표를 전 지도에서 고르게 되면서 큰 방향 전환이 잦아져 드러난 결함이다.
+
+    각도 차는 반드시 wrap 을 접어야 한다. 3.10 과 -3.10 rad 은 실제로는
+    5도 차이인데 그냥 빼면 6.2 rad 이 되어 '크게 돌았다' 고 잘못 본다.
+    """
+    sx, sy, syaw, st = ref
+    dyaw = abs(math.atan2(math.sin(ryaw - syaw), math.cos(ryaw - syaw)))
+    if math.hypot(rx - sx, ry - sy) > eps_m or dyaw > eps_rad:
+        return False, (rx, ry, ryaw, now)      # 진전 있음 → 기준 갱신
+    if now - st > confirm_s:
+        return True, None
+    return False, None
+
+
 def goal_score(kind, n_cells, dist_m, res, view_r, lam):
     """탐사 목표 후보의 점수 — 클수록 좋다. 단위는 m^2.
 
@@ -154,6 +177,10 @@ class PatrolNavigator(Node):
         # 장애물 탈출
         self.declare_parameter('stuck_confirm_s', 8.0)      # 이만큼 안 움직이면 박힘으로 판단
         self.declare_parameter('stuck_move_eps',  0.15)     # 이 이상 움직이면 정상(m)
+        # 제자리 회전도 진전으로 친다. 이게 없으면 목표 방향이 크게 바뀌어
+        # 로봇이 180도 도는 동안 '안 움직인다' 고 오판해 후진 탈출이 돌고,
+        # 앞뒤로 왕복만 하게 된다.
+        self.declare_parameter('stuck_turn_eps',  0.30)     # 이 이상 돌면 정상(rad)
         self.declare_parameter('escape_speed',    0.35)     # 후진 속도(m/s)
         self.declare_parameter('escape_max_s',    5.0)      # 후진 최대 시간(s)
         self.declare_parameter('escape_min_move', 0.8)      # 이만큼 물러나면 탈출 성공(m)
@@ -241,6 +268,7 @@ class PatrolNavigator(Node):
         self._explore_budget   = self.explore_timeout   # 현재 goal 의 제한시간(초)
         self.stuck_confirm_s   = float(self.get_parameter('stuck_confirm_s').value)
         self.stuck_move_eps    = float(self.get_parameter('stuck_move_eps').value)
+        self.stuck_turn_eps    = float(self.get_parameter('stuck_turn_eps').value)
         self.escape_speed      = float(self.get_parameter('escape_speed').value)
         self.escape_max_s      = float(self.get_parameter('escape_max_s').value)
         self.escape_min_move   = float(self.get_parameter('escape_min_move').value)
@@ -308,7 +336,7 @@ class PatrolNavigator(Node):
         self._approach_arrived = False        # 접근 완료 여부
 
         # 장애물 탈출(ESCAPE) 상태
-        self._stuck_ref = None                # (x, y, t) 마지막으로 움직인 기준점
+        self._stuck_ref = None                # (x, y, yaw, t) 마지막 진전 기준점
         self._escape_start = None
         self._escape_from = (0.0, 0.0)
         self._escape_last_t = -1e9            # 마지막 탈출 시각
@@ -1027,14 +1055,16 @@ class PatrolNavigator(Node):
         움직인다' 는 사실 자체로 감지한다. 원인(잔해 박힘·벽 붙음·경로 실패)을
         가리지 않고 잡히는 장점도 있다.
         """
+        ryaw = self._robot_yaw_map()
         if self._stuck_ref is None:
-            self._stuck_ref = (rx, ry, now)
+            self._stuck_ref = (rx, ry, ryaw, now)
             return False
-        sx, sy, st = self._stuck_ref
-        if math.hypot(rx - sx, ry - sy) > self.stuck_move_eps:
-            self._stuck_ref = (rx, ry, now)     # 움직였으면 기준 갱신
-            return False
-        return now - st > self.stuck_confirm_s
+        stuck, new_ref = stuck_decision(
+            self._stuck_ref, rx, ry, ryaw, now,
+            self.stuck_move_eps, self.stuck_turn_eps, self.stuck_confirm_s)
+        if new_ref is not None:
+            self._stuck_ref = new_ref
+        return stuck
 
     def _escape_tick(self, rx, ry, now):
         """후진으로 빠져나온다.
