@@ -50,6 +50,41 @@ IDLE, PATROL, MANUAL, FIRE_ALARM = 'IDLE', 'PATROL', 'MANUAL', 'FIRE_ALARM'
 INSPECT = 'INSPECT'      # 조난자 후보 확인 — 정지 후 포탑 조준
 ESCAPE  = 'ESCAPE'       # 장애물 안에 박힘 — 후진으로 탈출
 
+def claimed_by_peer(gx, gy, peer_goals, radius):
+    """다른 로봇이 이미 그 근처를 목표로 잡았는가.
+
+    지도를 공유해도 목표를 안 나누면 둘이 같은 구역으로 간다(실측: 두 대가
+    (-0.4,12.1) 과 (0.1,11.9) 를 각각 잡았다). 그러면 대수를 늘린 값어치가
+    없다.
+
+    peer_goals 는 {로봇이름: (x, y)}. 목표가 없는 로봇은 안 들어온다.
+    """
+    for (px, py) in peer_goals.values():
+        if math.hypot(gx - px, gy - py) < radius:
+            return True
+    return False
+
+
+def count_unique_victims(entries, merge_r):
+    """여러 로봇의 조난자 등록을 합쳐 실제 인원수를 센다.
+
+    entries 는 (로봇, 등록번호, x, y) 목록. 로봇마다 번호가 0 부터 시작하므로
+    번호로는 같은 사람인지 알 수 없다. 위치로 묶는다.
+
+    같은 사람을 둘로 세면 실종자 수가 채워진 것처럼 보여 수색이 조기
+    종료된다 — 1대에서 겪은 중복 등록 사고와 같은 종류다. 그래서 애매하면
+    묶는 쪽(덜 세는 쪽)이 안전하다. 덜 세면 더 찾으러 다닐 뿐이다.
+    """
+    clusters: list[tuple[float, float]] = []
+    for (_, _, x, y) in entries:
+        for (cx, cy) in clusters:
+            if math.hypot(x - cx, y - cy) < merge_r:
+                break
+        else:
+            clusters.append((x, y))
+    return len(clusters)
+
+
 def stuck_decision(ref, rx, ry, ryaw, now, eps_m, eps_rad, confirm_s):
     """진전이 있었는지 보고 박힘을 판정한다.
 
@@ -174,6 +209,13 @@ class PatrolNavigator(Node):
         # 목표 점수에서 거리 1m 에 매기는 벌점(m^2). '1m 더 가는 값어치를
         # 몇 m^2 로 보는가'. 로봇이 훑으며 지나가는 폭이 약 1.4m 이므로
         # 그보다 작게 잡아야 먼 미관측 구역으로 나간다.
+        # ── 팀 공유(로봇 여러 대) ──────────────────────────────
+        # peers 가 비면 1대 구성과 완전히 같다.
+        self.declare_parameter('peers', [''])
+        # 상대 목표에서 이 반경 안의 후보는 고르지 않는다(m).
+        self.declare_parameter('peer_claim_radius', 6.0)
+        # 두 로봇의 등록을 같은 사람으로 볼 거리(m).
+        self.declare_parameter('victim_merge_r', 1.5)
         self.declare_parameter('goal_dist_penalty', 0.5)
         # 라이다 경계를 넘었을 때 새로 보이는 깊이(m). 경계 '길이' 를
         # 넓이로 환산할 때 쓴다.
@@ -268,6 +310,9 @@ class PatrolNavigator(Node):
         self.explore_speed     = float(self.get_parameter('explore_assumed_speed').value)
         self.explore_tmo_max   = float(self.get_parameter('explore_goal_timeout_max').value)
         self.far_goal_min_dist = float(self.get_parameter('far_goal_min_dist').value)
+        self.peers = [x for x in self.get_parameter('peers').value if x]
+        self.peer_claim_r = float(self.get_parameter('peer_claim_radius').value)
+        self.victim_merge_r = float(self.get_parameter('victim_merge_r').value)
         self.goal_dist_penalty = float(self.get_parameter('goal_dist_penalty').value)
         self.frontier_view_r   = float(self.get_parameter('frontier_view_r').value)
         self.approach_ring_n   = int(self.get_parameter('approach_ring_n').value)
@@ -325,7 +370,10 @@ class PatrolNavigator(Node):
         self._visited_frontiers: list[tuple] = []
         self._explore_done = False
         self._sweeps = 0                      # 건물 전체를 훑은 횟수
-        self._victims: dict[int, tuple] = {}  # 확정 조난자 {pid: (x, y, label)}
+        # 확정 조난자 {(로봇, 등록번호): (x, y, label)}.
+        # 로봇마다 번호가 0 부터라 로봇 이름까지 키에 넣어야 안 겹친다.
+        self._victims: dict[tuple, tuple] = {}
+        self._peer_goals: dict[str, tuple] = {}   # 다른 로봇이 향하는 목표
         self._all_found_reported = False      # '전원 발견' 보고를 이미 냈는지
         self._fires_seen: list[tuple] = []    # 확정 화재 [(x, y)]
 
@@ -387,12 +435,34 @@ class PatrolNavigator(Node):
         # 어디를 말하는지 화면에서 볼 수 없었다.
         self.cover_pub  = self.create_publisher(OccupancyGrid, 'coverage_map', 1)
 
+        # ── 팀 공유 ────────────────────────────────────────────────
+        # 내 목표와 내 관측 격자를 내보내고, 상대 것을 받는다.
+        # peers 가 비면(1대 구성) 아무 것도 안 붙는다.
+        self.claim_pub = self.create_publisher(PoseStamped, 'explore_claim', 1)
+        # 관측 격자는 coverage_map 과 다르다 — 저쪽은 벽과 관측완료가 둘 다
+        # -1 이라 '봤다' 를 되읽을 수 없다. 여기선 0/1 로만 낸다.
+        self.seen_pub = self.create_publisher(OccupancyGrid, 'seen_grid', 1)
+        for peer in self.peers:
+            self.create_subscription(
+                PoseStamped, f'/{peer}/explore_claim',
+                lambda m, p=peer: self.peer_goal_cb(m, p), 1)
+            self.create_subscription(
+                OccupancyGrid, f'/{peer}/seen_grid',
+                lambda m, p=peer: self.peer_seen_cb(m, p), 1)
+            self.create_subscription(
+                MarkerArray, f'/{peer}/patient_markers',
+                lambda m, p=peer: self.victims_cb(m, p), 10)
+        if self.peers:
+            self.get_logger().info(f'팀 수색 — 동료 {", ".join(self.peers)}')
+
         self.create_timer(0.5, self.tick)     # 2 Hz FSM
         # 탈출 명령은 20Hz 로 낸다. Nav2 컨트롤러도 /cmd_vel 에 20Hz 로 0을
         # 쏘고 있어서, FSM 주기(2Hz)로 보내면 그 사이 0에 묻혀 로봇이 안 움직인다.
         self.create_timer(0.05, self._escape_cmd_tick)
         # 커버리지 격자는 크고 자주 안 바뀌므로 저주기로만 발행
         self.create_timer(2.0, self._publish_coverage)
+        if self.peers:
+            self.create_timer(2.0, self._publish_seen)
 
         if self.patrol_mode == 'explore':
             self.get_logger().info(
@@ -565,6 +635,22 @@ class PatrolNavigator(Node):
             unseen_area = float((free & ~self._seen).sum()) * res * res
         return (frontier_cells, unseen_area)
 
+    def _publish_seen(self):
+        """내가 눈으로 훑은 구역을 0/1 격자로 내보낸다(동료가 합칠 수 있게).
+
+        coverage_map 을 재활용하지 않는 이유: 거기선 벽과 관측완료가 둘 다
+        -1 이라 되읽으면 '봤다' 와 '벽' 을 구분할 수 없다.
+        """
+        g = self._map_msg
+        if g is None or self._seen is None:
+            return
+        m = OccupancyGrid()
+        m.header.frame_id = self.map_frame
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.info = g.info
+        m.data = self._seen.astype(np.int8).reshape(-1).tolist()
+        self.seen_pub.publish(m)
+
     def _publish_coverage(self):
         """수색 커버리지를 /coverage_map 으로 발행 (RViz Map 디스플레이용).
 
@@ -643,18 +729,48 @@ class PatrolNavigator(Node):
         return [(ox + (c[1] + 0.5) * res, oy + (c[0] + 0.5) * res, int(sizes[i]))
                 for c, i in zip(cents, idx)]
 
-    def victims_cb(self, msg: MarkerArray):
-        """target_manager 가 발행하는 환자 마커에서 확정 목록을 뽑는다."""
+    def victims_cb(self, msg: MarkerArray, src: str = 'self'):
+        """환자 마커에서 확정 목록을 뽑는다.
+
+        src 로 어느 로봇이 등록했는지 구분한다. 로봇마다 등록번호가 0 부터
+        시작하므로 번호만으로는 같은 사람인지 알 수 없다. 인원수는 위치로
+        묶어서 센다(count_unique_victims).
+        """
         for m in msg.markers:
             if m.ns != 'patient_text' or m.action != Marker.ADD:
                 continue
             pid = m.id // 3
-            self._victims[pid] = (m.pose.position.x, m.pose.position.y,
-                                  m.text.split('\n')[0] if m.text else '')
+            self._victims[(src, pid)] = (
+                m.pose.position.x, m.pose.position.y,
+                m.text.split('\n')[0] if m.text else '')
         # 실종자 수를 채운 순간 바로 보고한다(커버리지를 기다리지 않는다)
-        if (self.expected_victims > 0
-                and len(self._victims) >= self.expected_victims):
+        if self.expected_victims > 0 and self._victim_count() >= self.expected_victims:
             self._report_all_found()
+
+    def _victim_count(self) -> int:
+        """팀 전체가 찾은 실제 인원수. 같은 사람을 둘이 등록했으면 하나로 센다."""
+        return count_unique_victims(
+            [(k[0], k[1], v[0], v[1]) for k, v in self._victims.items()],
+            self.victim_merge_r)
+
+    def peer_goal_cb(self, msg: PoseStamped, peer: str):
+        """다른 로봇이 지금 향하는 목표. 같은 구역으로 겹쳐 가지 않기 위함."""
+        self._peer_goals[peer] = (msg.pose.position.x, msg.pose.position.y)
+
+    def peer_seen_cb(self, msg: OccupancyGrid, peer: str):
+        """다른 로봇이 눈으로 훑은 구역. 내 관측 기록에 합친다.
+
+        한 로봇이 이미 들여다본 방을 다른 로봇이 다시 갈 이유가 없다.
+        두 로봇이 같은 병합 지도(/map)를 쓰므로 격자 모양이 같아 그대로
+        겹칠 수 있다. 모양이 다르면(지도가 막 커진 직후) 건너뛴다.
+        """
+        if self._seen is None:
+            return
+        H, W = self._seen.shape
+        if msg.info.height != H or msg.info.width != W:
+            return
+        a = np.asarray(msg.data, dtype=np.int8).reshape(H, W)
+        self._seen |= (a > 0)
 
     def fire_seen_cb(self, msg: PointStamped):
         fx, fy = msg.point.x, msg.point.y
@@ -867,7 +983,7 @@ class PatrolNavigator(Node):
         for _, (_, _, lbl) in vics:
             by_lvl[lbl] = by_lvl.get(lbl, 0) + 1
         _, unseen = self._coverage_left()
-        lines = [f'🏁 전원 발견! 조난자 {len(vics)}/{self.expected_victims}명 '
+        lines = [f'🏁 전원 발견! 조난자 {self._victim_count()}/{self.expected_victims}명 '
                  '확인 — 구조 대기',
                  '  ' + ' / '.join(f'{k} {v}명' for k, v in sorted(by_lvl.items())),
                  f'  화재 {len(self._fires_seen)}건']
@@ -888,7 +1004,7 @@ class PatrolNavigator(Node):
         vics = sorted(self._victims.items())
         fires = list(self._fires_seen)
         lines = [f'━━ 수색 {sweep_n}회차 완료 — 미탐사·미관측 구역 없음 ━━',
-                 f'  조난자 {len(vics)}명, 화재 {len(fires)}건']
+                 f'  조난자 {self._victim_count()}명, 화재 {len(fires)}건']
         for pid, (x, y, lbl) in vics:
             lines.append(f'   · #{pid} {lbl} ({x:.1f}, {y:.1f})')
         for i, (x, y) in enumerate(fires):
@@ -1002,6 +1118,11 @@ class PatrolNavigator(Node):
                 continue           # 접근 가능한 자유공간을 못 찾음 → 건너뜀
             # 당긴 결과가 로봇 코앞이면 도착 판정이 즉시 서서 제자리걸음이 된다
             if math.hypot(goal[0] - rx, goal[1] - ry) < self.frontier_reach:
+                continue
+            # 동료가 이미 그쪽으로 가고 있으면 넘긴다. 지도를 공유해도 목표를
+            # 안 나누면 둘이 같은 구역으로 몰린다(실측: 두 대가 (-0.4,12.1)
+            # 과 (0.1,11.9) 를 각각 잡았다).
+            if claimed_by_peer(fx, fy, self._peer_goals, self.peer_claim_r):
                 continue
             score = goal_score(kind, n, d, self._map_res(),
                                self.frontier_view_r, self.goal_dist_penalty)
@@ -1312,7 +1433,7 @@ class PatrolNavigator(Node):
             self.get_logger().info(
                 f'{phase} — 미탐사 경계 {fr_cells}셀(완료 기준 '
                 f'{self.done_frontier_cells}), 미관측 {unseen:.1f}m²(기준 '
-                f'{unseen_budget:.1f}), 조난자 {len(self._victims)}'
+                f'{unseen_budget:.1f}), 조난자 {self._victim_count()}'
                 + (f'/{self.expected_victims}' if self.expected_victims > 0 else '')
                 + '명', throttle_duration_sec=60.0)
             # 판정 규칙은 순수 함수로 분리해 단위 테스트한다(sweep_decision).
@@ -1320,7 +1441,7 @@ class PatrolNavigator(Node):
                 fr_cells, unseen, unseen_budget, self.done_frontier_cells,
                 self._goals_done, self.min_goals_for_sweep,
                 self._known_free_area(), self.min_area_for_sweep,
-                len(self._victims), self.expected_victims)
+                self._victim_count(), self.expected_victims)
 
             if decision == 'done':
                 if not self._explore_done:
@@ -1336,7 +1457,7 @@ class PatrolNavigator(Node):
                 # 처음부터 다시 훑는다.
                 self._sweeps += 1
                 self.get_logger().warn(
-                    f'전 구역을 훑었으나 조난자 {len(self._victims)}/'
+                    f'전 구역을 훑었으나 조난자 {self._victim_count()}/'
                     f'{self.expected_victims}명만 확인됨 — 놓친 구역이 있다고 보고 '
                     f'{self._sweeps + 1}회차 재수색 시작(시야 기록 초기화)')
                 self._seen = None
@@ -1383,6 +1504,13 @@ class PatrolNavigator(Node):
         self._send_goal(nxt[0], nxt[1])
         self._wp_sent_t = now
         self._far_lock = True           # 도착/시간초과까지 이 목표를 붙든다
+        if self.peers:                  # 동료가 이쪽으로 안 오도록 알린다
+            c = PoseStamped()
+            c.header.frame_id = self.map_frame
+            c.header.stamp = self.get_clock().now().to_msg()
+            c.pose.position.x, c.pose.position.y = self._frontier_src
+            c.pose.orientation.w = 1.0
+            self.claim_pub.publish(c)
         # 먼 목표일수록 시간을 더 준다 (직선거리 기준, 경로는 더 길므로 넉넉히)
         gd = math.hypot(nxt[0] - rx, nxt[1] - ry)
         self._explore_budget = min(self.explore_tmo_max,

@@ -235,7 +235,10 @@ def generate_launch_description():
                  remappings=tf_remap + [('map', '/map')],
                  parameters=[{'use_sim_time': True,
                               'map_frame': 'map',
-                              'base_frame': f'{prefix}base_footprint'}] + [{
+                              'base_frame': f'{prefix}base_footprint',
+                              # 3단계: 동료의 목표·관측·명부를 받는다
+                              'peers': [o['name'] for o in ROBOTS
+                                        if o['name'] != name]}] + [{
                      'patrol_mode': 'explore',
                      # 런치 인자는 문자열이라 그대로 주면 rclpy 가 STRING 으로
                      # 추론해 INTEGER 파라미터와 안 맞고 노드가 즉시 죽는다.
