@@ -100,6 +100,12 @@ def generate_launch_description():
                 '/turret_pitch_cmd@std_msgs/msg/Float64]gz.msgs.Double',
                 '/camera/image@sensor_msgs/msg/Image[gz.msgs.Image',
                 '/camera/depth_image@sensor_msgs/msg/Image[gz.msgs.Image',
+                # 깊이 포인트클라우드 — Nav2 장애물 입력.
+                # 2D 라이다는 지면 0.23m 한 평면만 본다. 누운 사람, 높이 뜬
+                # 침상·휠체어는 그 평면을 벗어나 지도에 아예 안 찍혔고
+                # (실측: 조난자 7명 중 3명이 SLAM 맵에서 빈 공간),
+                # 로봇이 그대로 밀고 들어갔다.
+                '/camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
                 '/thermal/image_raw@sensor_msgs/msg/Image[gz.msgs.Image',
             ],
             remappings=[
