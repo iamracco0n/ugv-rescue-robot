@@ -1,14 +1,12 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
-                            TimerAction)
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.substitutions import (Command, LaunchConfiguration,
+from launch.substitutions import (LaunchConfiguration,
                                   PathJoinSubstitution, TextSubstitution)
-from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
 
@@ -16,7 +14,6 @@ def generate_launch_description():
     pkg_bringup = get_package_share_directory('ugv_bringup')
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
 
-    xacro_file = os.path.join(pkg_desc, 'urdf', 'ugv.urdf.xacro')
     rviz_config_file = os.path.join(pkg_desc, 'rviz', 'ugv.rviz')
 
     # 월드 선택. SDF 파일명과 world 이름이 같아야 한다(스폰 시 -world 로 씀).
@@ -59,62 +56,18 @@ def generate_launch_description():
             condition=IfCondition(headless),
         ),
 
-        # 2. 로봇 상태 퍼블리셔 (use_sim_time 고정)
-        Node(
-            package='robot_state_publisher',
-            executable='robot_state_publisher',
-            parameters=[{
-                'robot_description': ParameterValue(Command(['xacro ', xacro_file]), value_type=str),
-                'use_sim_time': True
-            }],
-            output='screen'
-        ),
-
-        # 3. 로봇 스폰
-        TimerAction(
-            # 큰 월드(모델 50개 이상 + Fuel 메시)는 로딩이 길어, 3초에 스폰하면
-            # /world/<name>/create 서비스가 아직 안 떠서 로봇이 안 생긴다.
-            period=8.0, 
-            actions=[
-                Node(
-                    package='ros_gz_sim',
-                    executable='create',
-                    arguments=['-world', world, '-topic', 'robot_description', '-name', 'ugv', '-x', '0.0', '-y', '0.0', '-z', '0.15'],
-                    output='screen'
-                )
-            ]
-        ),
-
-        # 4. ROS-Gazebo 브리지
-        Node(
-            package='ros_gz_bridge',
-            executable='parameter_bridge',
-            arguments=[
-                '/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist',
-                '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
-                '/model/ugv/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
-                '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
-                '/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
-                '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
-                '/turret_yaw_cmd@std_msgs/msg/Float64]gz.msgs.Double',
-                '/turret_pitch_cmd@std_msgs/msg/Float64]gz.msgs.Double',
-                '/camera/image@sensor_msgs/msg/Image[gz.msgs.Image',
-                '/camera/depth_image@sensor_msgs/msg/Image[gz.msgs.Image',
-                # 깊이 포인트클라우드 — Nav2 장애물 입력.
-                # 2D 라이다는 지면 0.23m 한 평면만 본다. 누운 사람, 높이 뜬
-                # 침상·휠체어는 그 평면을 벗어나 지도에 아예 안 찍혔고
-                # (실측: 조난자 7명 중 3명이 SLAM 맵에서 빈 공간),
-                # 로봇이 그대로 밀고 들어갔다.
-                '/camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
-                '/thermal/image_raw@sensor_msgs/msg/Image[gz.msgs.Image',
-            ],
-            remappings=[
-                ('/model/ugv/tf',      '/tf'),
-                ('/camera/image',       '/camera/camera/color/image_raw'),
-                ('/camera/depth_image', '/camera/camera/aligned_depth_to_color/image_raw'),
-            ],
-            parameters=[{'use_sim_time': True}],
-            output='screen'
+        # 2~4. 로봇 한 대분(상태 퍼블리셔 + 스폰 + 브리지).
+        # 여러 대를 띄울 때는 이 include 를 이름만 바꿔 반복한다
+        # (multi_robot_sim.launch.py 참조). prefix 를 비워 두면 토픽·프레임
+        # 이름이 지금까지와 완전히 같다.
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(pkg_bringup, 'launch', 'robot.launch.py')
+            ),
+            launch_arguments={
+                'name': 'ugv', 'prefix': '', 'world': world,
+                'x': '0.0', 'y': '0.0', 'delay': '8.0',
+            }.items(),
         ),
 
         # 5. 알비즈 실행 (헤드리스면 생략)
