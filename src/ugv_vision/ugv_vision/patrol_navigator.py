@@ -50,6 +50,29 @@ IDLE, PATROL, MANUAL, FIRE_ALARM = 'IDLE', 'PATROL', 'MANUAL', 'FIRE_ALARM'
 INSPECT = 'INSPECT'      # 조난자 후보 확인 — 정지 후 포탑 조준
 ESCAPE  = 'ESCAPE'       # 장애물 안에 박힘 — 후진으로 탈출
 
+def actionable_unseen_cells(unseen, min_cluster):
+    """계획기가 실제로 목표로 삼을 수 있는 미관측 셀 수만 센다.
+
+    계획기는 min_cluster 셀 이상인 군집만 후보로 잡는다. 그런데 완료 판정이
+    자투리까지 전부 세면, 로봇이 절대 지울 수 없는 면적이 남아 수색이
+    영원히 안 끝난다.
+
+    실측(큰 월드, 조난자 7/7 을 다 찾은 뒤):
+        미관측 군집 5794개, 총 206.0 m^2
+          계획기가 갈 수 있음(>=40셀)     61개  174.0 m^2
+          너무 작아 목표가 못 됨(<40셀) 5733개   32.0 m^2
+
+    저 32 m^2 가 완료 판정을 영원히 막는다. 두 기준은 반드시 같아야 한다.
+    """
+    if not unseen.any():
+        return 0
+    lbl, k = ndimage.label(unseen, structure=np.ones((3, 3), bool))
+    if k == 0:
+        return 0
+    sizes = np.bincount(lbl.ravel())[1:]
+    return int(sizes[sizes >= min_cluster].sum())
+
+
 def claimed_by_peer(gx, gy, peer_goals, radius):
     """다른 로봇이 이미 그 근처를 목표로 잡았는가.
 
@@ -651,7 +674,13 @@ class PatrolNavigator(Node):
         if self._seen is None or self._seen.shape != free.shape:
             unseen_area = float(free.sum()) * res * res
         else:
-            unseen_area = float((free & ~self._seen).sum()) * res * res
+            # 계획기가 목표로 삼을 수 있는 크기의 군집만 센다.
+            # 자투리까지 세면 로봇이 절대 못 지우는 면적이 남아 수색이
+            # 영원히 안 끝난다(실측: 32 m^2 가 5733개 조각으로 흩어져 있었다).
+            # 이 하한은 _find_visual_frontiers 에 주는 값과 같아야 한다.
+            cells = actionable_unseen_cells(free & ~self._seen,
+                                            self.visual_min_local)
+            unseen_area = float(cells) * res * res
         return (frontier_cells, unseen_area)
 
     def _publish_seen(self):
