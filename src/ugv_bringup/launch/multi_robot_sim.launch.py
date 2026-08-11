@@ -141,6 +141,17 @@ def generate_launch_description():
     # 큰 월드는 자유공간이 2098m^2, 미니맵은 200 미만이라 상수 200 이면
     # 미니맵에서는 조건이 영원히 안 선다(BOUNDS 와 같은 종류의 문제).
     MIN_AREA = float(os.environ.get('UGV_MIN_AREA', '200.0'))
+    # 로봇 스폰까지 기다릴 초. 월드가 다 뜨기 전에 요청하면 스폰 서비스가
+    # 없어 타임아웃난다 — 로봇이 아예 안 생기고 그 뒤 TF·Nav2 가 줄줄이
+    # 실패한다(오류 2000줄 넘게).
+    #
+    #   [create] Request to create entity from service
+    #            [/world/<name>/create] timed out
+    #
+    # 느린 머신에서 실제로 났다(오로라 i7 10세대, 3런 중 2런 실패). 첫 런에
+    # 몰리는 이유는 빌드 직후라 디스크 캐시가 비어 로딩이 더 느려서다.
+    # 머신에 맞춰 늘릴 수 있게 뺀다. SLAM·Nav2 기동도 같이 밀린다.
+    SPAWN = float(os.environ.get('UGV_SPAWN_DELAY', '8.0'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
@@ -202,13 +213,13 @@ def generate_launch_description():
                 os.path.join(pkg_bringup, 'launch', 'sim_robot.launch.py')),
             launch_arguments={
                 'name': name, 'prefix': prefix, 'world': world,
-                'x': r['x'], 'y': r['y'], 'delay': str(8.0 + i * 2.0),
+                'x': r['x'], 'y': r['y'], 'delay': str(SPAWN + i * 2.0),
                 'bridge_clock': 'true' if i == 0 else 'false',
             }.items()))
 
         # SLAM — 로봇마다 자기 지도를 만든다. 프레임 이름이 안 갈리면
         # 두 SLAM 이 같은 map→odom 을 발행해 TF 트리가 깨진다.
-        actions.append(TimerAction(period=14.0 + i * 2.0, actions=[
+        actions.append(TimerAction(period=SPAWN + 6.0 + i * 2.0, actions=[
             Node(package='slam_toolbox',
                  executable='async_slam_toolbox_node',
                  name='slam_toolbox', namespace=name,
@@ -233,7 +244,7 @@ def generate_launch_description():
         #   씌우지 않는다(GroupAction 안에 PushRosNamespace 가 없다).
         #   그냥 include 하면 노드가 /controller_server 로 떠서 ugv1: 아래
         #   파라미터를 못 읽고 'No critics defined for FollowPath' 로 죽는다.
-        actions.append(TimerAction(period=22.0 + i * 4.0, actions=[
+        actions.append(TimerAction(period=SPAWN + 14.0 + i * 4.0, actions=[
             GroupAction([
                 PushRosNamespace(name),
                 IncludeLaunchDescription(
@@ -285,14 +296,14 @@ def generate_launch_description():
     # tf 로 발행하므로(/ugv1/tf) 화면에 로봇 본체도 경로선도 안 나온다.
     # 프레임 이름은 이미 갈려 있어(ugv1/base_link) 한 트리에 합쳐도 안
     # 겹치니, 시각화용으로 그대로 옮겨 준다.
-    actions.append(TimerAction(period=18.0, actions=[
+    actions.append(TimerAction(period=SPAWN + 10.0, actions=[
         Node(package='ugv_vision', executable='tf_relay_node',
              name='tf_relay_node',
              parameters=[{'use_sim_time': True,
                           'robots': [r['name'] for r in robots]}],
              output='screen')]))
 
-    actions.append(TimerAction(period=20.0, actions=[
+    actions.append(TimerAction(period=SPAWN + 12.0, actions=[
         Node(package='ugv_vision', executable='map_merge_node',
              name='map_merge_node',
              parameters=[{
@@ -313,7 +324,7 @@ def generate_launch_description():
         common = [{'use_sim_time': True,
                    'map_frame': f'{prefix}map',
                    'base_frame': f'{prefix}base_footprint'}]
-        actions.append(TimerAction(period=52.0 + i * 4.0, actions=[
+        actions.append(TimerAction(period=SPAWN + 44.0 + i * 4.0, actions=[
             Node(package='ugv_vision', executable='yolo_pose_node',
                  name='yolo_pose_node', namespace=name,
                  remappings=tf_remap,
