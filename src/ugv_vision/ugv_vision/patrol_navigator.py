@@ -50,6 +50,28 @@ IDLE, PATROL, MANUAL, FIRE_ALARM = 'IDLE', 'PATROL', 'MANUAL', 'FIRE_ALARM'
 INSPECT = 'INSPECT'      # 조난자 후보 확인 — 정지 후 포탑 조준
 ESCAPE  = 'ESCAPE'       # 장애물 안에 박힘 — 후진으로 탈출
 
+# 비트 수 표 — 방향 마스크가 0~15 라 표 조회가 가장 빠르다
+_POPCOUNT = np.array([bin(i).count('1') for i in range(16)], dtype=np.uint8)
+
+
+def dir_bit(angle):
+    """관측 방향을 4구획 비트로 바꾼다. 동=1, 북=2, 서=4, 남=8.
+
+    한 번 본 칸을 '봤음' 으로만 표시하면, 한 방향에서 스쳐 본 구석도 다시
+    안 간다. 가려진 조난자(다른 물체 뒤, 특정 각도에서만 보이는)를 못 찾는
+    원인으로 보인다 — 실측으로 2대도 6런 중 3런만 7/7 을 냈고, 미달성 런도
+    대부분 6명까지는 찾았다.
+
+    방향을 쌓아 두면 '어느 쪽에서만 봤다' 를 구분할 수 있다. 반대편에서 다시
+    보면 가림이 풀린다. 4구획이면 90도씩이라 앞뒤가 확실히 갈린다.
+
+    numpy 불리언이 이미 1바이트라 uint8 비트마스크로 바꿔도 메모리는 같다.
+    """
+    # -45~45 를 동쪽으로 묶기 위해 45도 밀어서 나눈다
+    q = int(math.floor((angle + math.pi / 4) / (math.pi / 2))) % 4
+    return 1 << q
+
+
 def actionable_cells(mask, min_cluster):
     """계획기가 실제로 목표로 삼을 수 있는 셀 수만 센다.
 
@@ -323,6 +345,10 @@ class PatrolNavigator(Node):
         # 목표로 삼아야 한다. 이 값이 크면 계획기가 못 잡는 조각이 남아
         # 완료 판정이 영원히 안 선다.
         self.declare_parameter('visual_min_local', 40)      # 셀 수(0.1m^2)
+        # 몇 방향에서 봐야 '제대로 봤다' 로 칠지. 1 이면 예전과 같다.
+        # 2 로 두면 한 방향에서만 스쳐 본 칸을 다시 훑는다 — 가려진 조난자를
+        # 찾기 위한 것이다. 대신 수색이 길어진다.
+        self.declare_parameter('seen_min_dirs', 2)
         # 사각지대(벽 모서리·장애물 뒤)는 여유가 안 나오므로 낮게 잡는다
         self.declare_parameter('visual_clearance', 0.45)
         # 목표 도착 후 그 자리에서 포탑이 훑을 시간(초). 바로 다음 목표로
@@ -394,6 +420,7 @@ class PatrolNavigator(Node):
         self.cam_fov           = float(self.get_parameter('cam_fov_rad').value)
         self.visual_min        = int(self.get_parameter('visual_min_size').value)
         self.visual_min_local  = int(self.get_parameter('visual_min_local').value)
+        self.seen_min_dirs     = int(self.get_parameter('seen_min_dirs').value)
         self.visual_clearance  = float(self.get_parameter('visual_clearance').value)
         self.dwell_s           = float(self.get_parameter('arrive_dwell_s').value)
         self.min_goals_for_sweep = int(self.get_parameter('min_goals_for_sweep').value)
@@ -443,7 +470,7 @@ class PatrolNavigator(Node):
         self._fires_seen: list[tuple] = []    # 확정 화재 [(x, y)]
 
         # 시야 커버리지 — SLAM 맵과 같은 격자에 정렬해서 유지한다
-        self._seen = None                     # bool 배열 (h, w)
+        self._seen = None                     # uint8 방향 비트마스크 (h, w)
         self._seen_geom = None                # (w, h, res, ox, oy) — 바뀌면 재정렬
         self._turret_yaw = 0.0
 
@@ -638,7 +665,8 @@ class PatrolNavigator(Node):
                 g.info.origin.position.x, g.info.origin.position.y)
         if self._seen_geom == geom:
             return
-        new = np.zeros((g.info.height, g.info.width), dtype=bool)
+        # 방향 비트마스크(동1 북2 서4 남8). 불리언과 같은 1바이트다.
+        new = np.zeros((g.info.height, g.info.width), dtype=np.uint8)
         if self._seen is not None and self._seen_geom is not None:
             ow, oh, _ores, oox, ooy = self._seen_geom
             # 기존 커버리지를 새 격자 좌표로 옮긴다 (해상도는 동일 전제)
@@ -664,6 +692,8 @@ class PatrolNavigator(Node):
 
         cam = self._robot_yaw_map() + self._turret_yaw
         half = self.cam_fov / 2.0
+        # 광선이 향하는 쪽이 아니라, 그 칸에서 로봇을 바라보는 쪽을 적는다.
+        # '어느 방향에서 이 칸을 봤나' 가 가림을 판단하는 기준이기 때문이다.
         n_rays = 21
         step = res * 0.9
         for i in range(n_rays):
@@ -677,8 +707,17 @@ class PatrolNavigator(Node):
                     break
                 if occ[iy, ix]:
                     break                      # 벽 뒤는 못 본다
-                self._seen[iy, ix] = True
+                self._seen[iy, ix] |= dir_bit(a + math.pi)
                 d += step
+
+    def _seen_enough(self):
+        """충분히 본 칸의 불리언 격자. 방향 수가 기준 이상인 칸만 참."""
+        if self._seen is None:
+            return None
+        if self.seen_min_dirs <= 1:
+            return self._seen > 0
+        # 켜진 비트 수를 센다 (0~15 이므로 표를 쓰는 게 빠르다)
+        return _POPCOUNT[self._seen] >= self.seen_min_dirs
 
     def _coverage_left(self):
         """아직 남은 수색량을 (미탐사 경계 셀 수, 미관측 자유공간 m^2) 로 반환.
@@ -752,14 +791,15 @@ class PatrolNavigator(Node):
                                        self.frontier_standoff,
                                        self.goal_clearance) is not None:
                         frontier_cells += int(sizes[i])
-        if self._seen is None or self._seen.shape != free.shape:
+        seen_ok = self._seen_enough()
+        if seen_ok is None or seen_ok.shape != free.shape:
             unseen_area = float(free.sum()) * res * res
         else:
             # 계획기가 목표로 삼을 수 있는 크기의 군집만 센다.
             # 자투리까지 세면 로봇이 절대 못 지우는 면적이 남아 수색이
             # 영원히 안 끝난다(실측: 32 m^2 가 5733개 조각으로 흩어져 있었다).
             # 이 하한은 _find_visual_frontiers 에 주는 값과 같아야 한다.
-            unseen_mask = free & ~self._seen
+            unseen_mask = free & ~seen_ok
             # 미관측도 탐사 범위 안만 센다. 구역을 갈라 배정하면 상대
             # 구역은 내가 절대 못 가는데, 그걸 세면 완료가 영원히 안 선다.
             # 경계 셀에는 범위를 적용해 놓고 여기만 빠뜨렸다(실측: 구역분할
@@ -790,7 +830,7 @@ class PatrolNavigator(Node):
         m.header.frame_id = self.map_frame
         m.header.stamp = self.get_clock().now().to_msg()
         m.info = g.info
-        m.data = self._seen.astype(np.int8).reshape(-1).tolist()
+        m.data = self._seen.astype(np.int8).reshape(-1).tolist()  # 0~15
         self.seen_pub.publish(m)
 
     def _publish_coverage(self):
@@ -814,8 +854,9 @@ class PatrolNavigator(Node):
         unknown = arr < 0
         out = np.full((H, W), -1, dtype=np.int8)
         out[unknown] = 100                       # 가본 적 없음 = 짙은 안개
-        if self._seen is not None and self._seen.shape == free.shape:
-            out[free & ~self._seen] = 55         # 지나갔지만 눈으로 못 봄
+        seen_ok = self._seen_enough()
+        if seen_ok is not None and seen_ok.shape == free.shape:
+            out[free & ~seen_ok] = 55         # 지나갔지만 눈으로 못 봄
         else:
             out[free] = 55
         m = OccupancyGrid()
@@ -856,7 +897,10 @@ class PatrolNavigator(Node):
         res = g.info.resolution
         ox, oy = g.info.origin.position.x, g.info.origin.position.y
         arr = np.asarray(g.data, dtype=np.int16).reshape(H, W)
-        target = (arr >= 0) & (arr < 25) & (~self._seen)
+        seen_ok = self._seen_enough()
+        if seen_ok is None or seen_ok.shape != arr.shape:
+            return []
+        target = (arr >= 0) & (arr < 25) & (~seen_ok)
         if not target.any():
             return []
         lbl, n = ndimage.label(target, structure=np.ones((3, 3), dtype=bool))
@@ -911,8 +955,8 @@ class PatrolNavigator(Node):
         H, W = self._seen.shape
         if msg.info.height != H or msg.info.width != W:
             return
-        a = np.asarray(msg.data, dtype=np.int8).reshape(H, W)
-        self._seen |= (a > 0)
+        a = np.asarray(msg.data, dtype=np.uint8).reshape(H, W)
+        self._seen |= a          # 방향 비트까지 합쳐진다
 
     def fire_seen_cb(self, msg: PointStamped):
         fx, fy = msg.point.x, msg.point.y
