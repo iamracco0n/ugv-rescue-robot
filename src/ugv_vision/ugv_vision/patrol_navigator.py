@@ -731,6 +731,15 @@ class PatrolNavigator(Node):
                 for c, i in zip(ndimage.center_of_mass(frontier, lbl, big), big):
                     fx = ox + (c[1] + 0.5) * res
                     fy = oy + (c[0] + 0.5) * res
+                    # 이미 가본 경계는 계획기가 다시 안 고른다(_pick_frontier
+                    # 의 1.5m 중복 판정). 가봤는데도 남아 있다면 지울 수 없는
+                    # 것이다 — 벽 안쪽 미탐사처럼. 판정도 같이 빼야 한다.
+                    # 실측: 접근가능 필터만으로는 벽 띠가 통과했다. 벽에서
+                    # 1m 떨어져 설 수는 있으니 _pull_back 이 성공한다.
+                    # '접근이 된다' 와 '지울 수 있다' 는 다르다.
+                    if any(math.hypot(fx - vx, fy - vy) < 1.5
+                           for vx, vy in self._visited_frontiers):
+                        continue
                     if self._pull_back(fx, fy, rx, ry,
                                        self.frontier_standoff,
                                        self.goal_clearance) is not None:
