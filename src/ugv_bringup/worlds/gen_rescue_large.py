@@ -21,6 +21,8 @@ DOOR = 1.8                 # 출입구 폭
 N_ROOMS = 5                # 남/북 각 5개 방
 
 out = []
+# 자동 채점용 정답. 배치 함수가 채우고 --truth 로 JSON 저장한다.
+TRUTH = {'world': 'rescue_building_large', 'victims': [], 'fires': []}
 
 
 def add(s):
@@ -62,16 +64,25 @@ def wall_with_doors(name, axis, fixed, span_lo, span_hi, doors):
             box(f'{name}_{i}', fixed, mid, WALL_H / 2, WALL_T, ln, WALL_H)
 
 
-def person(name, uri, x, y, z, roll, pitch, yaw):
+def person(name, uri, x, y, z, roll, pitch, yaw, triage=None):
+    """조난자 배치. triage 는 자동 채점용 정답 등급(1/2/3).
+
+    정답을 별도 파일에 손으로 적으면 월드를 고칠 때 반드시 어긋난다.
+    배치와 같은 자리에 적어 두고 --truth 로 함께 내보낸다.
+    """
     add(f'''    <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/{uri}</uri>
       <name>{name}</name>
       <static>true</static>
       <pose>{x} {y} {z} {roll} {pitch} {yaw}</pose>
     </include>''')
+    if triage is not None:
+        TRUTH['victims'].append(
+            {'name': name, 'x': x, 'y': y, 'triage': triage, 'model': uri})
 
 
 def fire(name, x, y, z=0.6, sx=0.9, sy=0.9, sz=1.2):
+    TRUTH['fires'].append({'name': name, 'x': x, 'y': y})
     add(f'''    <model name="{name}">
       <static>true</static>
       <pose>{x} {y} {z} 0 0 0</pose>
@@ -185,15 +196,15 @@ for i, (x, y, sx, sy, sz, yaw) in enumerate(debris, 1):
 # ── 조난자 ────────────────────────────────────────────────────────────
 # 자세를 일부러 섞었다. 서있음/누움만 있던 기존 월드로는 트리아지 분류기가
 # 애매한 자세를 어떻게 판단하는지 볼 수 없었다.
-person('victim_standing_n1', 'Standing%20person', -22.0, 16.0, 0, 0, 0, -1.57)
-person('victim_female_n3',   'Casual%20female',    -1.0, 15.5, 0, 0, 0, 2.0)
-person('victim_lying_s2',    'Standing%20person', -14.0, -16.0, 0.15, 0, -1.5708, 0.5)
+person('victim_standing_n1', 'Standing%20person', -22.0, 16.0, 0, 0, 0, -1.57, triage=3)
+person('victim_female_n3',   'Casual%20female',    -1.0, 15.5, 0, 0, 0, 2.0, triage=3)
+person('victim_lying_s2',    'Standing%20person', -14.0, -16.0, 0.15, 0, -1.5708, 0.5, triage=1)
 # 앉아있는 사람 — 휠체어 환자. 서있음도 누움도 아닌 애매한 자세.
-person('victim_sitting_n4',  'PatientWheelChair',  12.0, 10.0, 0, 0, 0, 1.2)
+person('victim_sitting_n4',  'PatientWheelChair',  12.0, 10.0, 0, 0, 0, 1.2, triage=2)
 # 침대에 누운 환자 — 바닥에 누운 것과 다른 높이/실루엣
-person('victim_bed_s4',      'TrolleyBedPatient',   9.0, -14.0, 0, 0, 0, 0.3)
+person('victim_bed_s4',      'TrolleyBedPatient',   9.0, -14.0, 0, 0, 0, 0.3, triage=1)
 # 잔해에 반쯤 가린 사람 — 오탐 게이트와 접근 로직 시험용
-person('victim_occluded_s1', 'Casual%20female',   -23.5, -16.0, 0, 0, 0, 0.9)
+person('victim_occluded_s1', 'Casual%20female',   -23.5, -16.0, 0, 0, 0, 0.9, triage=3)
 # 복도 동쪽 끝 — 이동 중 먼 거리에서 먼저 보이는 대상.
 # 원래 'Male visitor' 를 썼는데 이 Fuel 자산만 <model> 이 아니라 <actor> 다
 # (걷기 애니메이션 + 자체 trajectory pose 0 1 0). 그래서
@@ -204,7 +215,7 @@ person('victim_occluded_s1', 'Casual%20female',   -23.5, -16.0, 0, 0, 0, 0.9)
 #     분류돼 L1 로 나왔다.
 # 걸어다니는 사람은 애초에 구조 대상이 아니므로 나머지 6명과 같은
 # 정적 모델로 통일한다.
-person('victim_corridor_e',  'Standing%20person',  24.0, 0.5, 0, 0, 0, 3.14)
+person('victim_corridor_e',  'Standing%20person',  24.0, 0.5, 0, 0, 0, 3.14, triage=3)
 
 # 가린 사람 바로 앞 잔해
 box('debris_occluder', -22.6, -15.4, 0.55, 1.2, 0.9, 1.1,
@@ -218,4 +229,16 @@ fire('fire_source_4', -26.0, -0.5, sx=0.7, sy=0.7, sz=1.0)   # 복도 서쪽 끝
 
 add('  </world>\n</sdf>')
 
-print('\n'.join(out))
+import sys
+
+if '--truth' in sys.argv:
+    # 정답만 JSON 으로 저장(SDF 는 stdout). 자동 채점이 이 파일을 읽는다.
+    import json
+    path = sys.argv[sys.argv.index('--truth') + 1]
+    with open(path, 'w', encoding='utf-8') as fp:
+        json.dump(TRUTH, fp, ensure_ascii=False, indent=2)
+    sys.stderr.write(
+        f"정답 저장: {path} "
+        f"(조난자 {len(TRUTH['victims'])}명, 화재 {len(TRUTH['fires'])}건)\n")
+else:
+    print('\n'.join(out))

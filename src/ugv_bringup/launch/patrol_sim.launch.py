@@ -5,6 +5,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Time
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -40,12 +41,31 @@ def generate_launch_description():
         'world', default_value='rescue_building',
         description='worlds/ 아래 SDF 이름 (rescue_building | rescue_building_large)')
 
+    # 화면 없이 돌릴지. 자동 채점(tools/run_eval.sh)에서 쓴다.
+    headless_arg = DeclareLaunchArgument(
+        'headless', default_value='false',
+        description='true 면 gz GUI·RViz 없이 서버만 실행')
+
+    # 탐사 성향 조절 — 파라미터 스윕으로 최적값을 찾기 위해 런치에서 연다.
+    # 노드는 초기화 때 한 번만 읽으므로 런타임 param set 으로는 못 바꾼다.
+    budget_arg = DeclareLaunchArgument(
+        'goal_dist_penalty', default_value='0.5',
+        description='목표 점수에서 거리 1m 에 매기는 벌점(m^2). '
+                    '크면 가까운 곳만 맴돌고, 작으면 멀리 나간다')
+    radius_arg = DeclareLaunchArgument(
+        'frontier_view_r', default_value='8.0',
+        description='라이다 경계를 넘었을 때 새로 보이는 깊이(m). '
+                    '경계 길이를 넓이로 환산할 때 쓴다')
+
     # 1. Gazebo + Robot + 브리지 + RViz (열화상 브리지 포함)
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_bringup, 'launch', 'gazebo.launch.py')
         ),
-        launch_arguments={'world': LaunchConfiguration('world')}.items()
+        launch_arguments={
+            'world': LaunchConfiguration('world'),
+            'headless': LaunchConfiguration('headless'),
+        }.items()
     )
 
     # 2. SLAM Toolbox (14초 후 — 로봇 스폰 8초 이후)
@@ -108,6 +128,16 @@ def generate_launch_description():
                      'use_sim_time': True,
                      'patrol_enabled_on_boot': LaunchConfiguration('patrol_enabled_on_boot'),
                      'expected_victims': LaunchConfiguration('expected_victims'),
+                     # 실수형으로 강제한다. 런치 인자는 문자열이라 '90' 을
+                     # 넘기면 rclpy 가 INTEGER 로 추론해 DOUBLE 파라미터와
+                     # 타입이 안 맞고, 노드가 기동 즉시 죽는다
+                     # (InvalidParameterTypeException).
+                     'goal_dist_penalty': ParameterValue(
+                         LaunchConfiguration('goal_dist_penalty'),
+                         value_type=float),
+                     'frontier_view_r': ParameterValue(
+                         LaunchConfiguration('frontier_view_r'),
+                         value_type=float),
                  }], output='screen'),
         ]
     )
@@ -116,6 +146,9 @@ def generate_launch_description():
         patrol_arg,
         victims_arg,
         world_arg,
+        headless_arg,
+        budget_arg,
+        radius_arg,
         gazebo_launch,
         slam_launch,
         nav2_launch,

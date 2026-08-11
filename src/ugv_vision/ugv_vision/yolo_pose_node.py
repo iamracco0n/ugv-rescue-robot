@@ -513,6 +513,7 @@ class YoloPoseNode(Node):
             out.triage_label              = final_label
             out.status                    = 'TRACKING'
             out.capture_turret_yaw        = float(capture_yaw)
+            out.w, out.h                  = float(x2 - x1), float(y2 - y1)
             self.pub.publish(out)
         else:
             self.label_history.clear()

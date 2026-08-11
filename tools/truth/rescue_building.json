@@ -1,0 +1,23 @@
+{
+  "world": "rescue_building",
+  "_note": [
+    "손으로 쓴 SDF 라 정답을 여기에 따로 적는다(큰 월드는 생성기가 자동 출력).",
+    "월드를 고치면 이 파일도 함께 고칠 것.",
+    "triage 는 '이름' 이 아니라 '실제 배치 자세' 기준이다.",
+    "person_l2_urgent 는 이름과 달리 pitch=0 으로 똑바로 서 있어",
+    "자세 기준으로는 L3(자력 대피 가능)가 맞다.",
+    "이름대로 L2 를 시험하려면 월드에서 앉은 자세로 바꿔야 한다."
+  ],
+  "victims": [
+    { "name": "person_l3_normal",   "x": -9.0, "y": 7.0,  "triage": 3,
+      "model": "Standing person",  "pose": "서있음" },
+    { "name": "person_l2_urgent",   "x": 6.0,  "y": 1.0,  "triage": 3,
+      "model": "Casual female",    "pose": "서있음 (이름과 불일치)" },
+    { "name": "person_l1_critical", "x": 10.0, "y": -7.0, "triage": 1,
+      "model": "Standing person",  "pose": "누움 (pitch -1.5708)" }
+  ],
+  "fires": [
+    { "name": "fire_source_1", "x": 12.0,  "y": 8.5 },
+    { "name": "fire_source_2", "x": -12.0, "y": -8.0 }
+  ]
+}

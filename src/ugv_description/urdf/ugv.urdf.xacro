@@ -205,6 +205,11 @@
     <sensor name="rgbd_camera" type="rgbd_camera">
       <pose>0 0 0 0 0 0</pose>
       <topic>/camera</topic>
+      <!-- 포인트클라우드를 Nav2 장애물 입력으로 쓰려면 frame_id 가 TF 에
+           있는 이름이어야 한다. 없으면 스코프명(ugv/base_footprint/...)이
+           나가고 코스트맵이 변환을 못 해 통째로 버린다.
+           (열화상도 같은 이유로 이미 지정돼 있다) -->
+      <gz_frame_id>camera_link</gz_frame_id>
       <update_rate>15</update_rate>
       <camera>
         <horizontal_fov>1.089</horizontal_fov>
