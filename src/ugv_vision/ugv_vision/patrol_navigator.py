@@ -751,8 +751,21 @@ class PatrolNavigator(Node):
             # 자투리까지 세면 로봇이 절대 못 지우는 면적이 남아 수색이
             # 영원히 안 끝난다(실측: 32 m^2 가 5733개 조각으로 흩어져 있었다).
             # 이 하한은 _find_visual_frontiers 에 주는 값과 같아야 한다.
-            cells = actionable_cells(free & ~self._seen,
-                                            self.visual_min_local)
+            unseen_mask = free & ~self._seen
+            # 미관측도 탐사 범위 안만 센다. 구역을 갈라 배정하면 상대
+            # 구역은 내가 절대 못 가는데, 그걸 세면 완료가 영원히 안 선다.
+            # 경계 셀에는 범위를 적용해 놓고 여기만 빠뜨렸다(실측: 구역분할
+            # 2대가 조난자를 다 찾고도 '미관측 135m² 남음' 에서 멈췄다).
+            if self.explore_bounds is not None:
+                bx0, by0, bx1, by1 = self.explore_bounds
+                ox = g.info.origin.position.x
+                oy = g.info.origin.position.y
+                xs_m = ox + (np.arange(W) + 0.5) * res
+                ys_m = oy + (np.arange(H) + 0.5) * res
+                inx = (xs_m >= bx0) & (xs_m <= bx1)
+                iny = (ys_m >= by0) & (ys_m <= by1)
+                unseen_mask = unseen_mask & (iny[:, None] & inx[None, :])
+            cells = actionable_cells(unseen_mask, self.visual_min_local)
             unseen_area = float(cells) * res * res
         return (frontier_cells, unseen_area)
 
