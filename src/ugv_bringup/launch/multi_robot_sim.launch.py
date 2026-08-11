@@ -139,8 +139,12 @@ def generate_launch_description():
             launch_arguments={'gz_args': ['-r -s ', world_file]}.items(),
             condition=IfCondition(headless)),
 
+        # 로봇마다 갈래가 진 토픽(카메라·안개·코스트맵)을 두 벌로 복제한
+        # 설정을 쓴다. 1대용 설정을 그대로 쓰면 카메라가 하나만 보이고
+        # 안개가 엉뚱한 토픽을 그린다.
         Node(package='rviz2', executable='rviz2',
-             arguments=['-d', os.path.join(pkg_desc, 'rviz', 'ugv.rviz')],
+             arguments=['-d', os.path.join(pkg_desc, 'rviz',
+                                           'ugv_multi.rviz')],
              parameters=[{'use_sim_time': True}], output='screen',
              condition=UnlessCondition(headless)),
     ]
