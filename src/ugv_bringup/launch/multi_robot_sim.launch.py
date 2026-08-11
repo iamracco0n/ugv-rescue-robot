@@ -87,6 +87,12 @@ ROBOTS = [
 def generate_launch_description():
     # 런치 인자는 문자열이므로 여기서 바로 못 읽는다. 환경변수로 받는다.
     n = int(os.environ.get('UGV_N_ROBOTS', '2'))
+    # 탐사 범위 [xmin,ymin,xmax,ymax]. 월드 외벽 안쪽으로 잡는다.
+    #   큰 월드 56x40 -> +-27, +-19
+    #   미니맵  18x12 -> +-8,  +-5
+    # 네 값이 다 0 이면 제한 없음.
+    BOUNDS = [float(v) for v in
+              os.environ.get('UGV_BOUNDS', '-27,-19,27,19').split(',')]
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
@@ -270,10 +276,12 @@ def generate_launch_description():
                  parameters=[{'use_sim_time': True,
                               'map_frame': 'map',
                               'base_frame': f'{prefix}base_footprint',
-                              # 큰 월드 외벽은 x=+-28, y=+-20. 로봇에
-                              # collision 이 없어 코스트맵 틈으로 벽을
-                              # 통과할 수 있으므로 목표를 안쪽으로 묶는다.
-                              'explore_bounds': [-27.0, -19.0, 27.0, 19.0],
+                              # 탐사 범위는 월드마다 다르다. 상수로 박으면
+                              # 다른 월드에서 아무 제약이 안 된다 — 실제로
+                              # 큰 월드 값(+-27,+-19)을 박아 두는 바람에
+                              # 18x12m 미니맵에서는 벽 밖 경계가 그대로
+                              # 잡혀 완료 판정이 영영 안 섰다(경계 217셀).
+                              'explore_bounds': BOUNDS,
                               # 3단계: 동료의 목표·관측·명부를 받는다
                               'peers': [o['name'] for o in robots
                                         if o['name'] != name] or [''],
