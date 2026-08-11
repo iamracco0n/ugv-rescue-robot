@@ -128,13 +128,20 @@ def generate_launch_description():
     x0, y0, x1, y1 = BOUNDS
     split = os.environ.get('UGV_SPLIT', '1') != '0'
 
+    # 분할 축. 기본은 긴 축을 반으로 가르는 것이고, UGV_SPLIT_AXIS 로
+    # 고정할 수 있다(x/y). 건물 복도가 분할선을 가로지르면 로봇이 자기
+    # 구역에 가려고 상대 구역을 통과해야 하므로, 월드에 따라 축을 바꿔
+    # 재볼 수 있어야 한다.
+    axis = os.environ.get('UGV_SPLIT_AXIS', 'auto')
+
     def bounds_for(idx, total):
         if not split or total < 2:
             return BOUNDS
-        if (x1 - x0) >= (y1 - y0):          # 가로가 길면 좌우로
+        wide = (x1 - x0) >= (y1 - y0) if axis == 'auto' else (axis == 'x')
+        if wide:                            # 좌우로 가른다
             w = (x1 - x0) / total
             return [x0 + idx * w, y0, x0 + (idx + 1) * w, y1]
-        h = (y1 - y0) / total               # 세로가 길면 위아래로
+        h = (y1 - y0) / total               # 위아래로 가른다
         return [x0, y0 + idx * h, x1, y0 + (idx + 1) * h]
     # 수색 완료를 인정하기 위한 최소 매핑 면적(m^2). 지도가 거의 없는 상태로
     # '다 훑었다' 고 하는 걸 막는 안전판인데, 월드 크기에 비례해야 한다.

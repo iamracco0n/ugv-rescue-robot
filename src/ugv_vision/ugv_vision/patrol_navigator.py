@@ -349,6 +349,14 @@ class PatrolNavigator(Node):
         # 2 로 두면 한 방향에서만 스쳐 본 칸을 다시 훑는다 — 가려진 조난자를
         # 찾기 위한 것이다. 대신 수색이 길어진다.
         self.declare_parameter('seen_min_dirs', 2)
+        # 내 구역 밖이라도 이 거리 안이면 간다(0 이면 구역이 하드 경계).
+        #
+        # 구역을 하드 경계로 두면 코앞의 미탐사도 상대 것이면 안 간다.
+        # 도움은 '내 구역을 완전히 비운 뒤' 에야 발동하는데, 그때는 건물을
+        # 가로질러야 해서 이동 비용이 이득을 먹는다(실측: 중간 월드에서
+        # 12번 넘어간 런이 가장 느렸다 — 866초).
+        # 가까우면 경계를 조금 넘도록 두는 편이 자연스럽다.
+        self.declare_parameter('cross_border_dist', 6.0)
         # 사각지대(벽 모서리·장애물 뒤)는 여유가 안 나오므로 낮게 잡는다
         self.declare_parameter('visual_clearance', 0.45)
         # 목표 도착 후 그 자리에서 포탑이 훑을 시간(초). 바로 다음 목표로
@@ -421,6 +429,8 @@ class PatrolNavigator(Node):
         self.visual_min        = int(self.get_parameter('visual_min_size').value)
         self.visual_min_local  = int(self.get_parameter('visual_min_local').value)
         self.seen_min_dirs     = int(self.get_parameter('seen_min_dirs').value)
+        self.cross_border_r    = float(
+            self.get_parameter('cross_border_dist').value)
         self.visual_clearance  = float(self.get_parameter('visual_clearance').value)
         self.dwell_s           = float(self.get_parameter('arrive_dwell_s').value)
         self.min_goals_for_sweep = int(self.get_parameter('min_goals_for_sweep').value)
@@ -1333,7 +1343,14 @@ class PatrolNavigator(Node):
             if bounds is not None:
                 x0, y0, x1, y1 = bounds
                 if not (x0 <= fx <= x1 and y0 <= fy <= y1):
-                    continue
+                    # 내 구역 밖이라도 코앞이면 간다. 경계 너머 3m 를
+                    # 남겨 두고 건물을 가로지르는 건 낭비다.
+                    if not (self.cross_border_r > 0
+                            and self.world_bounds is not None
+                            and d < self.cross_border_r
+                            and self.world_bounds[0] <= fx <= self.world_bounds[2]
+                            and self.world_bounds[1] <= fy <= self.world_bounds[3]):
+                        continue
             score = goal_score(kind, n, d, self._map_res(),
                                self.frontier_view_r, self.goal_dist_penalty)
             if score > best_score:

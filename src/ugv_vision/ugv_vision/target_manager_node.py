@@ -68,6 +68,11 @@ INSPECT_SAMPLES     = 5                   # 정지·조준 상태에서 모을 �
 INSPECT_TIMEOUT_S   = 28.0                # 전체 한도 (대상까지 접근 + 정지 + 포탑 슬루)
 INSPECT_AFTER_AIM_S = 2.5                 # 조준 완료 후 대상이 안 보일 때 포기까지
 MAX_SAMPLE_SPREAD   = 0.30                # 표본이 이보다 흩어지면 등록 보류 (m)
+# 반복 유령 자리 — 조준까지 했는데 아무것도 없던 곳을 기억해 다시 안 선다.
+# 유령 하나에 10~15초를 쓰고, 실측으로 25건과 41건이 700초/2672초 차이의
+# 일부였다. GHOST_NEED 를 0 으로 두면 이 기능이 꺼진다.
+GHOST_SPOT_R        = 1.5                 # 같은 자리로 볼 반경 (m)
+GHOST_NEED          = 3                   # 몇 번 반복돼야 막을지
 # 등록을 허용하는 최대 관측 거리.
 # 먼 거리 관측이 등록으로 이어지면 안 된다. 실제로 6.8~14.8m 에서 잡힌
 # 엉터리 투영 4건이 별개 조난자로 등록됐다(모두 같은 사람을 멀리서 잘못
@@ -102,6 +107,35 @@ def get_room_name(x, y):
     if y >  4.0: return 'Room A' if x < -1.0 else 'Room B'
     if y < -4.0: return 'Room C' if x < -1.0 else 'Room D'
     return 'Main Hall'
+
+
+def add_ghost_spot(gx, gy, spots, radius):
+    """유령으로 판명된 자리를 쌓는다. spots 는 [x, y, 횟수] 목록.
+
+    가까운 자리는 하나로 묶고 횟수만 올린다. 위치는 이동평균으로 다듬어
+    조금씩 어긋나는 관측이 여러 자리로 흩어지지 않게 한다.
+    """
+    for spot in spots:
+        if math.hypot(gx - spot[0], gy - spot[1]) < radius:
+            n = spot[2]
+            spot[0] = (spot[0] * n + gx) / (n + 1)
+            spot[1] = (spot[1] * n + gy) / (n + 1)
+            spot[2] = n + 1
+            return
+    spots.append([gx, gy, 1])
+
+
+def ghost_blocked(gx, gy, spots, radius, need):
+    """이 자리가 반복 유령으로 확인돼 이미 막혔는가.
+
+    한 번으로 막지 않는 이유: 진짜 조난자가 잠깐 가려져 유령으로 판명될 수
+    있다. 그걸 영구히 버리면 손해가 훨씬 크다. 같은 자리에서 need 번
+    반복될 때만 막는다.
+    """
+    for (sx, sy, n) in spots:
+        if n >= need and math.hypot(gx - sx, gy - sy) < radius:
+            return True
+    return False
 
 
 class TargetManager(Node):
@@ -175,6 +209,7 @@ class TargetManager(Node):
         self._inspect_start_t     = 0.0
         self._inspect_aim: tuple[float, float] | None = None   # 조준 목표 (map)
         self._inspect_samples: list[tuple[float, float]] = []
+        self._ghost_spots: list[list] = []     # [x, y, 횟수]
         self._inspect_settled_t: float | None = None   # 정지+조준이 붙은 시각
 
         # ── 환자 등록부 ───────────────────────────────────────────────
@@ -372,6 +407,9 @@ class TargetManager(Node):
                     return
             elif self._is_ignored(gx, gy):
                 return
+            if GHOST_NEED > 0 and ghost_blocked(gx, gy, self._ghost_spots,
+                                                GHOST_SPOT_R, GHOST_NEED):
+                return          # 여기서 이미 여러 번 헛걸음했다
             self._inspect_active     = True
             self._inspect_start_t    = now_sec
             self._inspect_aim        = (gx, gy)
@@ -414,6 +452,9 @@ class TargetManager(Node):
         # 겨눴는데도 대상이 안 보이면 유령 후보 → 조기 포기
         if (self._inspect_settled_t is not None and not target_fresh
                 and now_sec - self._inspect_settled_t > INSPECT_AFTER_AIM_S):
+            if self._inspect_aim is not None:
+                add_ghost_spot(self._inspect_aim[0], self._inspect_aim[1],
+                               self._ghost_spots, GHOST_SPOT_R)
             self.get_logger().info(
                 '조준 완료했는데 대상 없음 — 유령 후보로 판단, 순찰 재개')
             self._finish_inspect(registered=False)
