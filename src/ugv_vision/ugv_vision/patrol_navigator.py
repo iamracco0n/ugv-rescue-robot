@@ -713,7 +713,28 @@ class PatrolNavigator(Node):
         # 남아 수색이 영원히 안 끝난다. 자투리 미관측 때와 같은 어긋남이다
         # (실측: 미니맵에서 경계 143셀이 기준 40 아래로 안 내려가고 오히려
         #  131 -> 143 으로 늘었다).
-        frontier_cells = actionable_cells(frontier, self.frontier_min)
+        # 크기 하한을 넘어도, 계획기가 접근점을 못 찾는 군집은 목표가 될 수
+        # 없다. 실측(미니맵): 남은 경계 14군집이 전부 x~+-8, y~+-5 로 벽에
+        # 붙은 띠였다. 라이다가 찍은 마지막 자유 줄과 벽 안쪽 미탐사가 맞닿는
+        # 자리라, 지우려면 벽 속으로 들어가야 해서 원리적으로 못 지운다.
+        # _pick_frontier 는 _pull_back 으로 이런 후보를 이미 걸러낸다.
+        # 판정도 같은 필터를 거쳐야 한다.
+        frontier_cells = 0
+        if frontier.any():
+            lbl, k = ndimage.label(frontier, structure=np.ones((3, 3), bool))
+            sizes = np.bincount(lbl.ravel())
+            big = [i for i in range(1, k + 1) if sizes[i] >= self.frontier_min]
+            if big:
+                rx, ry = self._robot_pose()
+                ox = g.info.origin.position.x
+                oy = g.info.origin.position.y
+                for c, i in zip(ndimage.center_of_mass(frontier, lbl, big), big):
+                    fx = ox + (c[1] + 0.5) * res
+                    fy = oy + (c[0] + 0.5) * res
+                    if self._pull_back(fx, fy, rx, ry,
+                                       self.frontier_standoff,
+                                       self.goal_clearance) is not None:
+                        frontier_cells += int(sizes[i])
         if self._seen is None or self._seen.shape != free.shape:
             unseen_area = float(free.sum()) * res * res
         else:
