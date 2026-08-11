@@ -99,9 +99,11 @@ def namespaced_nav2_params(src, prefix, out_path):
 #   더 심해졌다. 실측: 3900초 동안 스폰 자리를 못 벗어나고 목표 245회 중
 #   243회 도달 실패.
 #   복도를 따라 앞뒤로 떼면 서로의 진로를 막지 않는다.
+# 구역 분할과 순서를 맞춘다 — 첫 로봇이 앞쪽 구역(서/남)을 맡으므로
+# 스폰도 그쪽에 둔다. 어긋나면 출발하자마자 건물을 가로질러야 한다.
 ROBOTS = [
-    {'name': 'ugv1', 'x': '0.0', 'y': '0.0'},
-    {'name': 'ugv2', 'x': '-6.0', 'y': '0.0'},
+    {'name': 'ugv1', 'x': '-6.0', 'y': '0.0'},   # 서쪽 구역
+    {'name': 'ugv2', 'x': '6.0',  'y': '0.0'},   # 동쪽 구역
 ]
 
 
@@ -114,6 +116,26 @@ def generate_launch_description():
     # 네 값이 다 0 이면 제한 없음.
     BOUNDS = [float(v) for v in
               os.environ.get('UGV_BOUNDS', '-27,-19,27,19').split(',')]
+    # 로봇마다 구역을 갈라 준다.
+    #
+    # 상대 목표 반경을 피하는 방식(3단계 선점)은 반응형이라, 가까운 후보가
+    # 다 잘리면 로봇이 멀리 있는 차선책으로 밀려난다. 그게 하필 상대 구역
+    # 이면 건물을 가로지른다(실측: ugv1 이 북쪽 y=+7 로 가다 남쪽 y=-15 로
+    # 21.9m 를 건너갔다). 2대를 쓰는 값어치가 사라진다.
+    #
+    # 아예 갈라 배정하면 그럴 일이 없다. 긴 축을 반으로 나눠 스폰 위치에
+    # 가까운 쪽을 맡긴다. UGV_SPLIT=0 이면 안 나눈다(예전 동작).
+    x0, y0, x1, y1 = BOUNDS
+    split = os.environ.get('UGV_SPLIT', '1') != '0'
+
+    def bounds_for(idx, total):
+        if not split or total < 2:
+            return BOUNDS
+        if (x1 - x0) >= (y1 - y0):          # 가로가 길면 좌우로
+            w = (x1 - x0) / total
+            return [x0 + idx * w, y0, x0 + (idx + 1) * w, y1]
+        h = (y1 - y0) / total               # 세로가 길면 위아래로
+        return [x0, y0 + idx * h, x1, y0 + (idx + 1) * h]
     # 수색 완료를 인정하기 위한 최소 매핑 면적(m^2). 지도가 거의 없는 상태로
     # '다 훑었다' 고 하는 걸 막는 안전판인데, 월드 크기에 비례해야 한다.
     # 큰 월드는 자유공간이 2098m^2, 미니맵은 200 미만이라 상수 200 이면
@@ -322,7 +344,7 @@ def generate_launch_description():
                               # 큰 월드 값(+-27,+-19)을 박아 두는 바람에
                               # 18x12m 미니맵에서는 벽 밖 경계가 그대로
                               # 잡혀 완료 판정이 영영 안 섰다(경계 217셀).
-                              'explore_bounds': BOUNDS,
+                              'explore_bounds': bounds_for(i, len(robots)),
                               'min_area_for_sweep': MIN_AREA,
                               # 3단계: 동료의 목표·관측·명부를 받는다
                               'peers': [o['name'] for o in robots
