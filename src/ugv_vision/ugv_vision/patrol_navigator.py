@@ -50,8 +50,12 @@ IDLE, PATROL, MANUAL, FIRE_ALARM = 'IDLE', 'PATROL', 'MANUAL', 'FIRE_ALARM'
 INSPECT = 'INSPECT'      # 조난자 후보 확인 — 정지 후 포탑 조준
 ESCAPE  = 'ESCAPE'       # 장애물 안에 박힘 — 후진으로 탈출
 
-def actionable_unseen_cells(unseen, min_cluster):
-    """계획기가 실제로 목표로 삼을 수 있는 미관측 셀 수만 센다.
+def actionable_cells(mask, min_cluster):
+    """계획기가 실제로 목표로 삼을 수 있는 셀 수만 센다.
+
+    미관측 격자와 미탐사 경계 둘 다에 쓴다. 두 곳 모두 계획기는 일정 크기
+    이상의 군집만 후보로 잡는데, 완료 판정이 자투리까지 세면 로봇이 절대
+    지울 수 없는 양이 남아 수색이 영원히 안 끝난다.
 
     계획기는 min_cluster 셀 이상인 군집만 후보로 잡는다. 그런데 완료 판정이
     자투리까지 전부 세면, 로봇이 절대 지울 수 없는 면적이 남아 수색이
@@ -64,9 +68,9 @@ def actionable_unseen_cells(unseen, min_cluster):
 
     저 32 m^2 가 완료 판정을 영원히 막는다. 두 기준은 반드시 같아야 한다.
     """
-    if not unseen.any():
+    if not mask.any():
         return 0
-    lbl, k = ndimage.label(unseen, structure=np.ones((3, 3), bool))
+    lbl, k = ndimage.label(mask, structure=np.ones((3, 3), bool))
     if k == 0:
         return 0
     sizes = np.bincount(lbl.ravel())[1:]
@@ -703,7 +707,13 @@ class PatrolNavigator(Node):
             inx = (xs >= x0) & (xs <= x1)
             iny = (ys >= y0) & (ys <= y1)
             frontier &= iny[:, None] & inx[None, :]
-        frontier_cells = int(frontier.sum())
+        # 계획기가 목표로 삼을 수 있는 크기의 군집만 센다.
+        # _find_frontiers 는 frontier_min 셀 이상인 군집만 후보로 잡는데
+        # 완료 판정이 셀을 통째로 세면, 로봇이 절대 지울 수 없는 경계가
+        # 남아 수색이 영원히 안 끝난다. 자투리 미관측 때와 같은 어긋남이다
+        # (실측: 미니맵에서 경계 143셀이 기준 40 아래로 안 내려가고 오히려
+        #  131 -> 143 으로 늘었다).
+        frontier_cells = actionable_cells(frontier, self.frontier_min)
         if self._seen is None or self._seen.shape != free.shape:
             unseen_area = float(free.sum()) * res * res
         else:
@@ -711,7 +721,7 @@ class PatrolNavigator(Node):
             # 자투리까지 세면 로봇이 절대 못 지우는 면적이 남아 수색이
             # 영원히 안 끝난다(실측: 32 m^2 가 5733개 조각으로 흩어져 있었다).
             # 이 하한은 _find_visual_frontiers 에 주는 값과 같아야 한다.
-            cells = actionable_unseen_cells(free & ~self._seen,
+            cells = actionable_cells(free & ~self._seen,
                                             self.visual_min_local)
             unseen_area = float(cells) * res * res
         return (frontier_cells, unseen_area)

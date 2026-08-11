@@ -42,7 +42,7 @@ def load(name):
 
 
 def main():
-    f = load('actionable_unseen_cells')
+    f = load('actionable_cells')
     fails = 0
 
     def check(desc, got, want):
