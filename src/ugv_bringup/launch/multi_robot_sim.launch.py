@@ -159,6 +159,9 @@ def generate_launch_description():
     # 몰리는 이유는 빌드 직후라 디스크 캐시가 비어 로딩이 더 느려서다.
     # 머신에 맞춰 늘릴 수 있게 뺀다. SLAM·Nav2 기동도 같이 밀린다.
     SPAWN = float(os.environ.get('UGV_SPAWN_DELAY', '8.0'))
+    # 개선 항목 스위치 — 하나씩 켜 가며 재기 위한 것(ablation).
+    SEEN_DIRS = int(os.environ.get('UGV_SEEN_DIRS', '2'))
+    GHOST_NEED = int(os.environ.get('UGV_GHOST_NEED', '3'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
@@ -338,7 +341,9 @@ def generate_launch_description():
                  parameters=[{'use_sim_time': True}], output='screen'),
             Node(package='ugv_vision', executable='target_manager_node',
                  name='target_manager_node', namespace=name,
-                 remappings=tf_remap, parameters=common, output='screen'),
+                 remappings=tf_remap,
+                 parameters=common + [{'ghost_need': GHOST_NEED}],
+                 output='screen'),
             Node(package='ugv_vision', executable='fire_detection_node',
                  name='fire_detection_node', namespace=name,
                  remappings=tf_remap,
@@ -363,6 +368,7 @@ def generate_launch_description():
                               # 18x12m 미니맵에서는 벽 밖 경계가 그대로
                               # 잡혀 완료 판정이 영영 안 섰다(경계 217셀).
                               # 내 구역(먼저 훑는 곳)
+                              'seen_min_dirs': SEEN_DIRS,
                               'explore_bounds': bounds_for(i, len(robots)),
                               # 건물 전체 — 내 구역을 끝내면 여기까지 넓혀
                               # 동료를 돕는다. 안 주면 자기 몫만 하고 논다.

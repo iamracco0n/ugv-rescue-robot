@@ -210,6 +210,9 @@ class TargetManager(Node):
         self._inspect_aim: tuple[float, float] | None = None   # 조준 목표 (map)
         self._inspect_samples: list[tuple[float, float]] = []
         self._ghost_spots: list[list] = []     # [x, y, 횟수]
+        # 몇 번 반복돼야 그 자리를 막을지. 0 이면 이 기능이 꺼진다.
+        self.declare_parameter('ghost_need', GHOST_NEED)
+        self.ghost_need = int(self.get_parameter('ghost_need').value)
         self._inspect_settled_t: float | None = None   # 정지+조준이 붙은 시각
 
         # ── 환자 등록부 ───────────────────────────────────────────────
@@ -407,8 +410,8 @@ class TargetManager(Node):
                     return
             elif self._is_ignored(gx, gy):
                 return
-            if GHOST_NEED > 0 and ghost_blocked(gx, gy, self._ghost_spots,
-                                                GHOST_SPOT_R, GHOST_NEED):
+            if self.ghost_need > 0 and ghost_blocked(
+                    gx, gy, self._ghost_spots, GHOST_SPOT_R, self.ghost_need):
                 return          # 여기서 이미 여러 번 헛걸음했다
             self._inspect_active     = True
             self._inspect_start_t    = now_sec
