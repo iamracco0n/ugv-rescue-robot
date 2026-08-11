@@ -46,6 +46,11 @@ def namespaced_nav2_params(src, prefix, out_path):
     지역 코스트맵이 map 을 바라보게 되어 제어가 깨진다.
     그래서 값을 보고 바꾼다.
     """
+    # 2대를 한 머신에서 돌리면 코스트맵 갱신이 CPU 를 가장 많이 먹는다.
+    # 갱신·발행 빈도를 낮춰 실시간(RTF 1.0)에 가깝게 만든다. 로봇이
+    # 0.15m/s 로 느리게 다니므로 5Hz -> 2Hz 로 낮춰도 회피에 지장이 없다.
+    rate = float(os.environ.get('UGV_COSTMAP_HZ', '0'))
+
     subs = {
         'map': f'{prefix}map',
         'odom': f'{prefix}odom',
@@ -66,6 +71,22 @@ def namespaced_nav2_params(src, prefix, out_path):
 
     with open(src, encoding='utf-8') as f:
         data = yaml.safe_load(f)
+
+    if rate > 0:
+        def slow(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if k == 'update_frequency':
+                        node[k] = rate
+                    elif k == 'publish_frequency':
+                        node[k] = min(rate, 1.0)
+                    else:
+                        slow(v)
+            elif isinstance(node, list):
+                for v in node:
+                    slow(v)
+        slow(data)
+
     with open(out_path, 'w', encoding='utf-8') as f:
         yaml.safe_dump(walk(data), f, allow_unicode=True)
     return out_path
