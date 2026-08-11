@@ -93,6 +93,11 @@ def generate_launch_description():
     # 네 값이 다 0 이면 제한 없음.
     BOUNDS = [float(v) for v in
               os.environ.get('UGV_BOUNDS', '-27,-19,27,19').split(',')]
+    # 수색 완료를 인정하기 위한 최소 매핑 면적(m^2). 지도가 거의 없는 상태로
+    # '다 훑었다' 고 하는 걸 막는 안전판인데, 월드 크기에 비례해야 한다.
+    # 큰 월드는 자유공간이 2098m^2, 미니맵은 200 미만이라 상수 200 이면
+    # 미니맵에서는 조건이 영원히 안 선다(BOUNDS 와 같은 종류의 문제).
+    MIN_AREA = float(os.environ.get('UGV_MIN_AREA', '200.0'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
@@ -282,6 +287,7 @@ def generate_launch_description():
                               # 18x12m 미니맵에서는 벽 밖 경계가 그대로
                               # 잡혀 완료 판정이 영영 안 섰다(경계 217셀).
                               'explore_bounds': BOUNDS,
+                              'min_area_for_sweep': MIN_AREA,
                               # 3단계: 동료의 목표·관측·명부를 받는다
                               'peers': [o['name'] for o in robots
                                         if o['name'] != name] or [''],
