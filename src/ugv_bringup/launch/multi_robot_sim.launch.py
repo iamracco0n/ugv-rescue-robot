@@ -141,7 +141,7 @@ def generate_launch_description():
         # 로봇 본체. /clock 은 월드에 하나뿐이어야 하므로 첫 대만 브리지한다.
         actions.append(IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
-                os.path.join(pkg_bringup, 'launch', 'robot.launch.py')),
+                os.path.join(pkg_bringup, 'launch', 'sim_robot.launch.py')),
             launch_arguments={
                 'name': name, 'prefix': prefix, 'world': world,
                 'x': r['x'], 'y': r['y'], 'delay': str(8.0 + i * 2.0),
@@ -161,7 +161,7 @@ def generate_launch_description():
                      'map_frame': f'{prefix}map',
                      'scan_topic': f'/{prefix}scan',
                  }],
-                 # tf 도 같은 이유로 상대 이름으로 되돌린다(robot.launch.py 주석 참조)
+                 # tf 도 같은 이유로 상대 이름으로 되돌린다(sim_robot.launch.py 주석 참조)
                  remappings=[('/map', f'/{name}/map'),
                              ('/map_metadata', f'/{name}/map_metadata'),
                              ('/tf', 'tf'), ('/tf_static', 'tf_static')],

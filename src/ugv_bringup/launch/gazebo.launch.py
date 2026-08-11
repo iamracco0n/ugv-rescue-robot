@@ -62,7 +62,7 @@ def generate_launch_description():
         # 이름이 지금까지와 완전히 같다.
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
-                os.path.join(pkg_bringup, 'launch', 'robot.launch.py')
+                os.path.join(pkg_bringup, 'launch', 'sim_robot.launch.py')
             ),
             launch_arguments={
                 'name': 'ugv', 'prefix': '', 'world': world,
