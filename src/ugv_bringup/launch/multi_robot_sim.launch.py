@@ -259,6 +259,17 @@ def generate_launch_description():
                        '--child-frame-id', f"{r['name']}/map"],
             parameters=[{'use_sim_time': True}], output='screen'))
 
+    # RViz 는 전역 /tf 를 본다. 2대 구성에서는 각 로봇이 자기 이름공간의
+    # tf 로 발행하므로(/ugv1/tf) 화면에 로봇 본체도 경로선도 안 나온다.
+    # 프레임 이름은 이미 갈려 있어(ugv1/base_link) 한 트리에 합쳐도 안
+    # 겹치니, 시각화용으로 그대로 옮겨 준다.
+    actions.append(TimerAction(period=18.0, actions=[
+        Node(package='ugv_vision', executable='tf_relay_node',
+             name='tf_relay_node',
+             parameters=[{'use_sim_time': True,
+                          'robots': [r['name'] for r in robots]}],
+             output='screen')]))
+
     actions.append(TimerAction(period=20.0, actions=[
         Node(package='ugv_vision', executable='map_merge_node',
              name='map_merge_node',
