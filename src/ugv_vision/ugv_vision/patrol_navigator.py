@@ -265,6 +265,11 @@ class PatrolNavigator(Node):
         #   관측됐는데 큰 월드 외벽은 x=+-28 이다. 건물 밖으로 나간 것이다.
         #   밖에는 볼 것도 없고 지도도 안 생겨 시간만 버린다.
         self.declare_parameter('explore_bounds', [0.0, 0.0, 0.0, 0.0])
+        # 건물 전체 범위. 내 구역을 다 훑으면 여기까지 넓혀 동료를 돕는다.
+        # 구역을 하드 필터로만 쓰면 자기 몫을 끝낸 로봇이 그냥 논다.
+        # 조난자가 구역마다 고르게 있을 리 없으므로(실측: 중간 월드 서1/동2),
+        # 그러면 늦은 쪽이 전체 시간을 정해 2대를 쓴 값어치가 사라진다.
+        self.declare_parameter('world_bounds', [0.0, 0.0, 0.0, 0.0])
         self.declare_parameter('goal_dist_penalty', 0.5)
         # 라이다 경계를 넘었을 때 새로 보이는 깊이(m). 경계 '길이' 를
         # 넓이로 환산할 때 쓴다.
@@ -369,6 +374,9 @@ class PatrolNavigator(Node):
         b = list(self.get_parameter('explore_bounds').value)
         # 넷이 다 0 이면 제한 없음으로 본다.
         self.explore_bounds = b if len(b) == 4 and any(b) else None
+        wb = list(self.get_parameter('world_bounds').value)
+        self.world_bounds = wb if len(wb) == 4 and any(wb) else None
+        self._helping = False          # 내 구역을 끝내고 동료를 돕는 중인가
         self.goal_dist_penalty = float(self.get_parameter('goal_dist_penalty').value)
         self.frontier_view_r   = float(self.get_parameter('frontier_view_r').value)
         self.approach_ring_n   = int(self.get_parameter('approach_ring_n').value)
@@ -698,8 +706,8 @@ class PatrolNavigator(Node):
         # 탐사 범위 밖의 경계는 세지 않는다. 목표로 삼는 걸 막아 놓고
         # 완료 판정에서는 세면 영원히 완료가 안 선다 — 자투리 미관측 때와
         # 똑같은 어긋남이다(실측: 미탐사 경계 220셀이 기준 40 아래로 안 내려감).
-        if self.explore_bounds is not None:
-            x0, y0, x1, y1 = self.explore_bounds
+        if self._active_bounds() is not None:
+            x0, y0, x1, y1 = self._active_bounds()
             ox = g.info.origin.position.x
             oy = g.info.origin.position.y
             xs = ox + (np.arange(W) + 0.5) * res
@@ -756,8 +764,8 @@ class PatrolNavigator(Node):
             # 구역은 내가 절대 못 가는데, 그걸 세면 완료가 영원히 안 선다.
             # 경계 셀에는 범위를 적용해 놓고 여기만 빠뜨렸다(실측: 구역분할
             # 2대가 조난자를 다 찾고도 '미관측 135m² 남음' 에서 멈췄다).
-            if self.explore_bounds is not None:
-                bx0, by0, bx1, by1 = self.explore_bounds
+            if self._active_bounds() is not None:
+                bx0, by0, bx1, by1 = self._active_bounds()
                 ox = g.info.origin.position.x
                 oy = g.info.origin.position.y
                 xs_m = ox + (np.arange(W) + 0.5) * res
@@ -1232,6 +1240,26 @@ class PatrolNavigator(Node):
                     for fx, fy, n in self._find_visual_frontiers(
                         self.visual_min_local)])
 
+        # 내 구역에서 먼저 고르고, 없으면 건물 전체로 넓혀 동료를 돕는다.
+        tries = [self.explore_bounds]
+        if self.world_bounds is not None and self.explore_bounds is not None:
+            tries.append(self.world_bounds)
+        for bounds in tries:
+            best, best_score, best_kind = self._score_cands(cands, rx, ry, bounds)
+            if best is not None:
+                helping = bounds is not self.explore_bounds
+                if helping != self._helping:
+                    self._helping = helping
+                    self.get_logger().info(
+                        '내 구역을 다 훑었다 — 동료 구역으로 넘어가 돕는다'
+                        if helping else '내 구역으로 복귀')
+                break
+        self._last_goal_kind = ('미탐사 경계' if best_kind == 'frontier'
+                                else '미관측 구역')
+        return best
+
+    def _score_cands(self, cands, rx, ry, bounds):
+        """주어진 범위 안에서 가장 좋은 후보를 고른다."""
         best, best_score, best_kind = None, -1e9, None
         for fx, fy, n, kind in cands:
             # 중복 판정은 반드시 '프론티어 중심' 기준. 당겨진 goal 로 비교하면
@@ -1258,17 +1286,25 @@ class PatrolNavigator(Node):
             # 과 (0.1,11.9) 를 각각 잡았다).
             if claimed_by_peer(fx, fy, self._peer_goals, self.peer_claim_r):
                 continue
-            if self.explore_bounds is not None:
-                x0, y0, x1, y1 = self.explore_bounds
+            if bounds is not None:
+                x0, y0, x1, y1 = bounds
                 if not (x0 <= fx <= x1 and y0 <= fy <= y1):
-                    continue          # 건물 밖 — 볼 것도 없고 지도도 안 생긴다
+                    continue
             score = goal_score(kind, n, d, self._map_res(),
                                self.frontier_view_r, self.goal_dist_penalty)
             if score > best_score:
                 best_score, best, best_kind = score, (goal, (fx, fy)), kind
-        self._last_goal_kind = ('미탐사 경계' if best_kind == 'frontier'
-                                else '미관측 구역')
-        return best
+        return best, best_score, best_kind
+
+    def _active_bounds(self):
+        """지금 실제로 훑는 범위. 동료를 돕는 중이면 건물 전체다.
+
+        완료 판정이 내 구역만 보면, 돕는 중에 상대 구역의 미탐사를 안 세서
+        '다 훑었다' 가 잘못 선다. 목표를 고르는 범위와 세는 범위는 같아야 한다.
+        """
+        if self._helping and self.world_bounds is not None:
+            return self.world_bounds
+        return self.explore_bounds
 
     def _map_res(self):
         """지도 해상도(m/셀). 지도가 아직 없으면 표준값."""

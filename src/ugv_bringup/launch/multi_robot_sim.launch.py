@@ -355,7 +355,11 @@ def generate_launch_description():
                               # 큰 월드 값(+-27,+-19)을 박아 두는 바람에
                               # 18x12m 미니맵에서는 벽 밖 경계가 그대로
                               # 잡혀 완료 판정이 영영 안 섰다(경계 217셀).
+                              # 내 구역(먼저 훑는 곳)
                               'explore_bounds': bounds_for(i, len(robots)),
+                              # 건물 전체 — 내 구역을 끝내면 여기까지 넓혀
+                              # 동료를 돕는다. 안 주면 자기 몫만 하고 논다.
+                              'world_bounds': BOUNDS,
                               'min_area_for_sweep': MIN_AREA,
                               # 3단계: 동료의 목표·관측·명부를 받는다
                               'peers': [o['name'] for o in robots
