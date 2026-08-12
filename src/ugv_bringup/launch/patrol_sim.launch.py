@@ -9,18 +9,19 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    # 누운 사람 관문 완화 스위치(측정용).
-    # 기본값은 본 코드 기본값과 같고, 완화 이전 동작을 재려면
-    #   UGV_LYING_KPTS=6 UGV_LYING_CONF=0.50
-    # 으로 돌리면 된다. 다시 빌드하지 않으므로 두 조건이 같은 바이너리다.
-    LYING_KPTS = int(os.environ.get('UGV_LYING_KPTS', '3'))
-    LYING_CONF = float(os.environ.get('UGV_LYING_CONF', '0.30'))
     """경비 순찰 + 화재 감지 통합 시뮬 런치.
 
     slam_nav_sim.launch.py 와 동일한 기반(Gazebo+SLAM+Nav2+YOLO+포탑)에
     fog 커버리지 대신 fire_detection_node + patrol_navigator 를 얹는다.
     Gazebo/브리지는 gazebo.launch.py 를 그대로 재사용(열화상 브리지 포함).
     """
+
+    # 누운 사람 관문 완화 스위치(측정용).
+    # 기본값은 본 코드 기본값과 같고, 완화 이전 동작을 재려면
+    #   UGV_LYING_KPTS=6 UGV_LYING_CONF=0.50
+    # 으로 돌리면 된다. 다시 빌드하지 않으므로 두 조건이 같은 바이너리다.
+    LYING_KPTS = int(os.environ.get('UGV_LYING_KPTS', '3'))
+    LYING_CONF = float(os.environ.get('UGV_LYING_CONF', '0.30'))
 
     patrol_arg = DeclareLaunchArgument(
         'patrol_enabled_on_boot',
