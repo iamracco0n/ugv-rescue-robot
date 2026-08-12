@@ -72,6 +72,42 @@ def dir_bit(angle):
     return 1 << q
 
 
+def segment_room(free, ry, rx, erode_cells):
+    """로봇이 지금 있는 '방' 을 자유공간에서 떼어낸다.
+
+    free        : bool 배열 (자유공간 True)
+    ry, rx      : 로봇 셀 좌표
+    erode_cells : 침식 반경(셀). **문 폭의 절반보다 커야** 문이 끊긴다.
+
+    반경 고정으로는 안 되는 이유: '주변에 안 본 곳이 없으면 나간다' 의
+    '주변' 을 5m 로 두면, 방이 그보다 크면 5m 안만 치우고 나가버린다.
+    방 크기는 방마다 다르므로 지도에서 직접 알아내야 한다.
+
+    거리변환을 쓴다. binary_erosion 을 반복하면 4-연결 구조라 마름모꼴로
+    깎이고 반복 횟수만큼 느리다. distance_transform_edt 는 한 번에 정확한
+    원형 침식을 준다.
+
+    되돌릴 때 팽창을 쓰면 안 된다 — 문틈으로 새어 옆방을 침범한다
+    (실측: 왼방 코어를 20셀 팽창하니 오른방을 6셀 침범, 140셀 오염).
+    대신 모든 자유공간 셀을 '가장 가까운 속살' 에 귀속시킨다. 이 방식은
+    문 한가운데서 자연스럽게 갈려 새지 않는다.
+    """
+    if free is None or not free[ry, rx]:
+        return None
+    dist = ndimage.distance_transform_edt(free)
+    core = dist > erode_cells
+    lbl, n = ndimage.label(core, structure=np.ones((3, 3), bool))
+    if n == 0:
+        return None
+    idx = ndimage.distance_transform_edt(
+        lbl == 0, return_distances=False, return_indices=True)
+    owner = lbl[idx[0], idx[1]]
+    my = owner[ry, rx]
+    if my == 0:
+        return None
+    return (owner == my) & free
+
+
 def actionable_cells(mask, min_cluster):
     """계획기가 실제로 목표로 삼을 수 있는 셀 수만 센다.
 
@@ -372,6 +408,19 @@ class PatrolNavigator(Node):
         # '수색 완료' 를 인정하기 위한 최소 근거 (기동 직후 오보 방지)
         self.declare_parameter('min_goals_for_sweep', 8)      # 도달한 목표 수
         self.declare_parameter('min_area_for_sweep', 200.0)   # 매핑된 자유공간 m^2
+        # ── 방을 덜 보고 나가는지 측정 (동작은 안 바꾼다) ──────────────
+        # 방에 사람이 숨을 만한 미관측이 남았는데 다른 방으로 넘어가면 센다.
+        # 벽 뒤 조난자를 놓치는 경로가 이것이라는 관찰이 있었는데, 실제로
+        # 몇 번 일어나는지 숫자가 없었다. 고치기 전에 먼저 잰다.
+        self.declare_parameter('room_leave_log', True)
+        # 침식 반경. **문 폭의 절반보다 커야** 문이 끊겨 방이 갈린다.
+        # 이 월드의 문은 1.8m 라 0.9m 초과가 필요하다 — 작게 잡으면 문이
+        # 안 끊겨 건물 전체가 한 방으로 나오고, 이탈이 한 번도 안 잡힌다.
+        # (tools/test_room_segment.py 가 1.8m 문 / 1.0m 반경으로 확인한다)
+        self.declare_parameter('room_erode_m', 1.0)
+        # 이보다 작은 미관측은 자투리로 보고 넘어간다. 누운 사람이 약 0.9m^2
+        # 라 그보다 조금 작게 잡아 사람이 숨을 수 있는 크기만 센다.
+        self.declare_parameter('room_leave_min_area', 0.8)
         # 실제로 '남은 양' 이 이 이하일 때만 완료로 인정한다
         self.declare_parameter('done_frontier_cells', 40)     # 미탐사 경계 셀
         self.declare_parameter('done_unseen_area', 8.0)       # 미관측 자유공간 m^2
@@ -442,6 +491,11 @@ class PatrolNavigator(Node):
         self.dwell_s           = float(self.get_parameter('arrive_dwell_s').value)
         self.min_goals_for_sweep = int(self.get_parameter('min_goals_for_sweep').value)
         self.min_area_for_sweep  = float(self.get_parameter('min_area_for_sweep').value)
+        self.room_leave_log      = bool(self.get_parameter('room_leave_log').value)
+        self.room_erode_m        = float(self.get_parameter('room_erode_m').value)
+        self.room_leave_min_area = float(self.get_parameter('room_leave_min_area').value)
+        self._room_leaves        = 0      # 덜 보고 나간 횟수
+        self._room_left_area     = 0.0    # 그때 남긴 미관측 합계 m^2
         self.done_frontier_cells = int(self.get_parameter('done_frontier_cells').value)
         self.done_unseen_area    = float(self.get_parameter('done_unseen_area').value)
         self.done_unseen_frac    = float(self.get_parameter('done_unseen_frac').value)
@@ -1317,7 +1371,62 @@ class PatrolNavigator(Node):
                 break
         self._last_goal_kind = ('미탐사 경계' if best_kind == 'frontier'
                                 else '미관측 구역')
+        if best is not None and self.room_leave_log:
+            self._check_room_leave(best[0], best[1], rx, ry)
         return best
+
+    def _check_room_leave(self, gx, gy, rx, ry):
+        """방에 사람이 숨을 만한 미관측을 남기고 나가는지 센다(측정 전용).
+
+        벽 뒤 조난자를 놓치는 경로가 이것이라는 관찰이 있었다. 다만 반대
+        방향 고장도 겪었다 — 예전에 '반경 5m 안을 먼저 처리' 로 두었더니
+        방 하나를 1.4~4.3m 잔걸음으로 갉아먹으며 나가질 못했다. 그래서
+        자투리(기본 0.8m^2 미만)는 세지 않는다. 사람이 숨을 수 있는 크기만
+        문제로 본다.
+
+        여기서는 세기만 하고 목표를 바꾸지 않는다. 고치기 전에 이 일이
+        실제로 몇 번 일어나는지부터 알아야 한다.
+        """
+        g = self._map_msg
+        seen_ok = self._seen_enough()
+        if g is None or seen_ok is None:
+            return
+        H, W = g.info.height, g.info.width
+        res = g.info.resolution
+        if res <= 0.0:
+            return
+        arr = np.asarray(g.data, dtype=np.int16).reshape(H, W)
+        free = (arr >= 0) & (arr < 25)
+        if seen_ok.shape != free.shape:
+            return
+        ox = g.info.origin.position.x
+        oy = g.info.origin.position.y
+
+        def to_cell(x, y):
+            ix = int((x - ox) / res)
+            iy = int((y - oy) / res)
+            if 0 <= ix < W and 0 <= iy < H:
+                return iy, ix
+            return None
+
+        here = to_cell(rx, ry)
+        there = to_cell(gx, gy)
+        if here is None or there is None:
+            return
+        er = max(1, int(round(self.room_erode_m / res)))
+        room = segment_room(free, here[0], here[1], er)
+        if room is None or room[there[0], there[1]]:
+            return          # 목표가 같은 방 안이면 나가는 게 아니다
+        min_cells = max(1, int(round(self.room_leave_min_area / (res * res))))
+        left = actionable_cells(room & ~seen_ok, min_cells)
+        if left <= 0:
+            return
+        area = float(left) * res * res
+        self._room_leaves += 1
+        self._room_left_area += area
+        self.get_logger().warn(
+            f'[방 이탈] 미관측 {area:.1f}m² 남기고 다른 방으로 — '
+            f'누적 {self._room_leaves}회 / {self._room_left_area:.1f}m²')
 
     def _score_cands(self, cands, rx, ry, bounds):
         """주어진 범위 안에서 가장 좋은 후보를 고른다."""
