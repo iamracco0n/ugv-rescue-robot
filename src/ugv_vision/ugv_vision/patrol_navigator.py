@@ -421,6 +421,19 @@ class PatrolNavigator(Node):
         # 이보다 작은 미관측은 자투리로 보고 넘어간다. 누운 사람이 약 0.9m^2
         # 라 그보다 조금 작게 잡아 사람이 숨을 수 있는 크기만 센다.
         self.declare_parameter('room_leave_min_area', 0.8)
+        # 지금 있는 방 안의 후보에 얹어 주는 점수(m^2). 0 이면 이 기능이 꺼진다.
+        #
+        # 실측(큰 월드 2대, 4런): 수색 후반에만 방을 덜 보고 나가는 일이
+        # 런당 19.3회, 덜 보고 나왔던 방으로 되돌아오는 왕복이 14.3회였다.
+        # 왕복은 한 번에 끝냈으면 안 했을 이동이라 순수 낭비다.
+        #
+        # '보너스' 이지 '필터' 가 아닌 것이 핵심이다. 예전에 '반경 5m 안을
+        # 먼저 처리' 라는 하드 필터를 썼다가 정반대 고장이 났다 — 점수식은
+        # 이미 큰 덩어리를 선호하는데 필터가 비교 대상을 눈앞으로 제한해
+        # 점수식을 무력화했고, 방 하나를 1.4~4.3m 잔걸음으로 갉아먹으며
+        # 다른 방으로 넘어가질 못했다. 보너스면 훨씬 좋은 바깥 후보가
+        # 여전히 이긴다.
+        self.declare_parameter('room_bonus', 0.0)
         # 실제로 '남은 양' 이 이 이하일 때만 완료로 인정한다
         self.declare_parameter('done_frontier_cells', 40)     # 미탐사 경계 셀
         self.declare_parameter('done_unseen_area', 8.0)       # 미관측 자유공간 m^2
@@ -494,6 +507,7 @@ class PatrolNavigator(Node):
         self.room_leave_log      = bool(self.get_parameter('room_leave_log').value)
         self.room_erode_m        = float(self.get_parameter('room_erode_m').value)
         self.room_leave_min_area = float(self.get_parameter('room_leave_min_area').value)
+        self.room_bonus          = float(self.get_parameter('room_bonus').value)
         self._room_leaves        = 0      # 덜 보고 나간 횟수
         self._room_left_area     = 0.0    # 그때 남긴 미관측 합계 m^2
         self._t_start            = None   # 첫 계측 시각(경과 시간 기준점)
@@ -1361,12 +1375,18 @@ class PatrolNavigator(Node):
                     for fx, fy, n in self._find_visual_frontiers(
                         self.visual_min_local)])
 
+        # 지금 있는 방을 한 번만 계산해 점수 보너스와 이탈 계측이 같이 쓴다.
+        room_info = None
+        if self.room_bonus > 0.0 or self.room_leave_log:
+            room_info = self._current_room(rx, ry)
+
         # 내 구역에서 먼저 고르고, 없으면 건물 전체로 넓혀 동료를 돕는다.
         tries = [self.explore_bounds]
         if self.world_bounds is not None and self.explore_bounds is not None:
             tries.append(self.world_bounds)
         for bounds in tries:
-            best, best_score, best_kind = self._score_cands(cands, rx, ry, bounds)
+            best, best_score, best_kind = self._score_cands(
+                cands, rx, ry, bounds, room_info)
             if best is not None:
                 helping = bounds is not self.explore_bounds
                 if helping != self._helping:
@@ -1383,14 +1403,53 @@ class PatrolNavigator(Node):
             # 순찰 노드가 죽어 3런이 목표 0회로 날아갔다. 재는 코드의
             # 실패는 재는 것만 멈추고 임무는 계속돼야 한다.
             try:
-                self._check_room_leave(best[0][0], best[0][1], rx, ry)
+                self._check_room_leave(best[0][0], best[0][1], rx, ry, room_info)
             except Exception as e:                      # noqa: BLE001
                 if self.room_leave_log:
                     self.room_leave_log = False
                     self.get_logger().error(f'[방 이탈] 계측 중단 — {e!r}')
         return best
 
-    def _check_room_leave(self, gx, gy, rx, ry):
+    def _current_room(self, rx, ry):
+        """로봇이 지금 있는 방 마스크와 좌표 변환 정보.
+
+        거리변환이 들어가 싸지 않으므로 목표를 고를 때 한 번만 계산해
+        점수 보너스와 이탈 계측이 함께 쓴다.
+
+        반환: (room, ox, oy, res, W, H) 또는 None
+        """
+        g = self._map_msg
+        if g is None:
+            return None
+        H, W = g.info.height, g.info.width
+        res = g.info.resolution
+        if res <= 0.0:
+            return None
+        ox = g.info.origin.position.x
+        oy = g.info.origin.position.y
+        ix = int((rx - ox) / res)
+        iy = int((ry - oy) / res)
+        if not (0 <= ix < W and 0 <= iy < H):
+            return None
+        arr = np.asarray(g.data, dtype=np.int16).reshape(H, W)
+        free = (arr >= 0) & (arr < 25)
+        er = max(1, int(round(self.room_erode_m / res)))
+        room = segment_room(free, iy, ix, er)
+        if room is None:
+            return None
+        return room, ox, oy, res, W, H
+
+    @staticmethod
+    def _in_room(info, x, y):
+        """월드 좌표가 그 방 안인지."""
+        room, ox, oy, res, W, H = info
+        ix = int((x - ox) / res)
+        iy = int((y - oy) / res)
+        if not (0 <= ix < W and 0 <= iy < H):
+            return False
+        return bool(room[iy, ix])
+
+    def _check_room_leave(self, gx, gy, rx, ry, info):
         """방에 사람이 숨을 만한 미관측을 남기고 나가는지 센다(측정 전용).
 
         벽 뒤 조난자를 놓치는 경로가 이것이라는 관찰이 있었다. 다만 반대
@@ -1402,35 +1461,11 @@ class PatrolNavigator(Node):
         여기서는 세기만 하고 목표를 바꾸지 않는다. 고치기 전에 이 일이
         실제로 몇 번 일어나는지부터 알아야 한다.
         """
-        g = self._map_msg
         seen_ok = self._seen_enough()
-        if g is None or seen_ok is None:
+        if info is None or seen_ok is None:
             return
-        H, W = g.info.height, g.info.width
-        res = g.info.resolution
-        if res <= 0.0:
-            return
-        arr = np.asarray(g.data, dtype=np.int16).reshape(H, W)
-        free = (arr >= 0) & (arr < 25)
-        if seen_ok.shape != free.shape:
-            return
-        ox = g.info.origin.position.x
-        oy = g.info.origin.position.y
-
-        def to_cell(x, y):
-            ix = int((x - ox) / res)
-            iy = int((y - oy) / res)
-            if 0 <= ix < W and 0 <= iy < H:
-                return iy, ix
-            return None
-
-        here = to_cell(rx, ry)
-        there = to_cell(gx, gy)
-        if here is None or there is None:
-            return
-        er = max(1, int(round(self.room_erode_m / res)))
-        room = segment_room(free, here[0], here[1], er)
-        if room is None:
+        room, ox, oy, res, W, H = info
+        if seen_ok.shape != room.shape:
             return
         if self._t_start is None:
             self._t_start = self._now()
@@ -1455,7 +1490,7 @@ class PatrolNavigator(Node):
                         f'{self._room_reentries}회')
                     break
 
-        if room[there[0], there[1]]:
+        if self._in_room(info, gx, gy):
             return          # 목표가 같은 방 안이면 나가는 게 아니다
         min_cells = max(1, int(round(self.room_leave_min_area / (res * res))))
         left = actionable_cells(room & ~seen_ok, min_cells)
@@ -1476,8 +1511,12 @@ class PatrolNavigator(Node):
             f'— 누적 {self._room_leaves}회 / {self._room_left_area:.1f}m² '
             f'/ 재진입 {self._room_reentries}회')
 
-    def _score_cands(self, cands, rx, ry, bounds):
-        """주어진 범위 안에서 가장 좋은 후보를 고른다."""
+    def _score_cands(self, cands, rx, ry, bounds, room_info=None):
+        """주어진 범위 안에서 가장 좋은 후보를 고른다.
+
+        room_info 가 있고 room_bonus 가 0 보다 크면, 지금 있는 방 안의
+        후보에 그만큼을 얹는다. 방을 덜 보고 나가는 것을 줄이기 위한 것이다.
+        """
         best, best_score, best_kind = None, -1e9, None
         for fx, fy, n, kind in cands:
             # 중복 판정은 반드시 '프론티어 중심' 기준. 당겨진 goal 로 비교하면
@@ -1517,6 +1556,11 @@ class PatrolNavigator(Node):
                         continue
             score = goal_score(kind, n, d, self._map_res(),
                                self.frontier_view_r, self.goal_dist_penalty)
+            # 지금 있는 방 안이면 보너스. 판정은 프론티어 중심이 아니라
+            # 실제로 갈 지점(goal)으로 한다 — 로봇이 가는 곳이 그쪽이다.
+            if room_info is not None and self.room_bonus > 0.0:
+                if self._in_room(room_info, goal[0], goal[1]):
+                    score += self.room_bonus
             if score > best_score:
                 best_score, best, best_kind = score, (goal, (fx, fy)), kind
         return best, best_score, best_kind

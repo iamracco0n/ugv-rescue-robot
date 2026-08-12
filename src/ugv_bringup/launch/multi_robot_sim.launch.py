@@ -164,6 +164,10 @@ def generate_launch_description():
     # 기본값을 끔으로 되돌린다. 스위치는 남겨 둔다 — 되켜서 재보려면 필요하다.
     SEEN_DIRS = int(os.environ.get('UGV_SEEN_DIRS', '1'))
     GHOST_NEED = int(os.environ.get('UGV_GHOST_NEED', '0'))
+    # 지금 있는 방 안의 후보에 얹는 점수(m^2). 0 이면 꺼짐(=지금 동작).
+    # 방을 덜 보고 나가는 것을 줄이려는 것인데, 세게 걸면 반대로 방에서
+    # 못 나오는 고장이 난다. 0 부터 올려 가며 재기 위해 열어 둔다.
+    ROOM_BONUS = float(os.environ.get('UGV_ROOM_BONUS', '0.0'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
@@ -371,6 +375,7 @@ def generate_launch_description():
                               # 잡혀 완료 판정이 영영 안 섰다(경계 217셀).
                               # 내 구역(먼저 훑는 곳)
                               'seen_min_dirs': SEEN_DIRS,
+                              'room_bonus': ROOM_BONUS,
                               'explore_bounds': bounds_for(i, len(robots)),
                               # 건물 전체 — 내 구역을 끝내면 여기까지 넓혀
                               # 동료를 돕는다. 안 주면 자기 몫만 하고 논다.
