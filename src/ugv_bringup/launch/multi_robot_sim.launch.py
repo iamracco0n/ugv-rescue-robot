@@ -160,8 +160,10 @@ def generate_launch_description():
     # 머신에 맞춰 늘릴 수 있게 뺀다. SLAM·Nav2 기동도 같이 밀린다.
     SPAWN = float(os.environ.get('UGV_SPAWN_DELAY', '8.0'))
     # 개선 항목 스위치 — 하나씩 켜 가며 재기 위한 것(ablation).
-    SEEN_DIRS = int(os.environ.get('UGV_SEEN_DIRS', '2'))
-    GHOST_NEED = int(os.environ.get('UGV_GHOST_NEED', '3'))
+    # 큰 월드 2대에서 조건당 13~14런을 재 봤고 셋 다 base 와 구분되지 않았다.
+    # 기본값을 끔으로 되돌린다. 스위치는 남겨 둔다 — 되켜서 재보려면 필요하다.
+    SEEN_DIRS = int(os.environ.get('UGV_SEEN_DIRS', '1'))
+    GHOST_NEED = int(os.environ.get('UGV_GHOST_NEED', '0'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
