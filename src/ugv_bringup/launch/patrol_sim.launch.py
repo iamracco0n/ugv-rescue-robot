@@ -20,8 +20,8 @@ def generate_launch_description():
     # 기본값은 본 코드 기본값과 같고, 완화 이전 동작을 재려면
     #   UGV_LYING_KPTS=6 UGV_LYING_CONF=0.50
     # 으로 돌리면 된다. 다시 빌드하지 않으므로 두 조건이 같은 바이너리다.
-    LYING_KPTS = int(os.environ.get('UGV_LYING_KPTS', '3'))
-    LYING_CONF = float(os.environ.get('UGV_LYING_CONF', '0.30'))
+    LYING_KPTS = int(os.environ.get('UGV_LYING_KPTS', '6'))
+    LYING_CONF = float(os.environ.get('UGV_LYING_CONF', '0.50'))
 
     patrol_arg = DeclareLaunchArgument(
         'patrol_enabled_on_boot',

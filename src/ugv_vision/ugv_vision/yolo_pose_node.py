@@ -111,9 +111,24 @@ class YoloPoseNode(Node):
         # 바닥에 쓰러진 사람 전용 키포인트 기준.
         # 서있는 사람은 박스가 세로로 길고 누운 사람은 가로로 길다 — 이건
         # 키포인트 없이 박스만으로 알 수 있어서, 닭이 먼저냐 문제가 없다.
+        #
+        # 기본값을 완화 없음(6 / 0.50 = 서있는 사람과 같은 기준)으로 둔다.
+        # 로봇을 누운 사람과 같은 방에서 시작시켜 동선 운을 없앤 뒤 3머신
+        # 48런으로 쟀고, 이득이 확인되지 않았다.
+        #
+        #   발견률   base 13/24(54%)   완화 15/24(63%)   p 약 0.55
+        #     메인 6/8 -> 5/8   OMEN 4/8 -> 4/8   오로라 3/8 -> 6/8
+        #
+        # 표본 6~7개 시점에는 세 머신이 모두 완화 쪽이었는데 8개에서 무너졌다.
+        # dirs 가 3개에서 앞서다 14개에서 무너진 것과 같은 패턴이다.
+        #
+        # 되돌리는 쪽을 고른 이유: 이 관문은 벽을 사람으로 잡던 문제를 막으려
+        # 넣은 검증된 방어다. 입증되지 않은 이득을 위해 그걸 푸는 것은 손해
+        # 보는 거래다. 기능과 스위치는 남긴다 — 가려진 조난자가 실제 문제로
+        # 확인되면 파라미터로 켜면 된다.
         self.declare_parameter('lying_aspect',    1.15)  # w/h 가 이 이상이면 누움 후보
-        self.declare_parameter('lying_min_kpts',  3)     # 그때 요구할 키포인트 개수
-        self.declare_parameter('lying_kpt_conf',  0.30)  # 그때 쓸 신뢰도 하한
+        self.declare_parameter('lying_min_kpts',  6)     # 그때 요구할 키포인트 개수
+        self.declare_parameter('lying_kpt_conf',  0.50)  # 그때 쓸 신뢰도 하한
         self.det_conf        = float(self.get_parameter('det_conf').value)
         self.min_kpt_conf    = float(self.get_parameter('min_kpt_conf').value)
         self.min_valid_kpts  = int(self.get_parameter('min_valid_kpts').value)
