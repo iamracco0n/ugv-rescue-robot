@@ -108,12 +108,21 @@ class YoloPoseNode(Node):
         self.declare_parameter('depth_tol',       2.00)
         self.declare_parameter('min_box_diag_px', 40.0)  # 너무 작은 박스 제거
         self.declare_parameter('max_box_diag_px', 900.0) # 화면 전체를 덮는 박스 제거
+        # 바닥에 쓰러진 사람 전용 키포인트 기준.
+        # 서있는 사람은 박스가 세로로 길고 누운 사람은 가로로 길다 — 이건
+        # 키포인트 없이 박스만으로 알 수 있어서, 닭이 먼저냐 문제가 없다.
+        self.declare_parameter('lying_aspect',    1.15)  # w/h 가 이 이상이면 누움 후보
+        self.declare_parameter('lying_min_kpts',  3)     # 그때 요구할 키포인트 개수
+        self.declare_parameter('lying_kpt_conf',  0.30)  # 그때 쓸 신뢰도 하한
         self.det_conf        = float(self.get_parameter('det_conf').value)
         self.min_kpt_conf    = float(self.get_parameter('min_kpt_conf').value)
         self.min_valid_kpts  = int(self.get_parameter('min_valid_kpts').value)
         self.depth_tol       = float(self.get_parameter('depth_tol').value)
         self.min_box_diag_px = float(self.get_parameter('min_box_diag_px').value)
         self.max_box_diag_px = float(self.get_parameter('max_box_diag_px').value)
+        self.lying_aspect    = float(self.get_parameter('lying_aspect').value)
+        self.lying_min_kpts  = int(self.get_parameter('lying_min_kpts').value)
+        self.lying_kpt_conf  = float(self.get_parameter('lying_kpt_conf').value)
         self._reject_counts  = {'conf': 0, 'kpt': 0, 'geom': 0, 'depth': 0}
 
         # 골격 기하로 자세(누움/앉음)를 판정해 트리아지 모델 결과를 보정할지.
@@ -240,15 +249,35 @@ class YoloPoseNode(Node):
         벽·기둥은 사람 실루엣이 없으므로 키포인트 신뢰도가 전반적으로 낮고,
         depth로 잰 거리와 박스 크기로 추정한 거리가 크게 어긋난다.
         (평평한 벽은 가까워도 박스가 작게/크게 제멋대로 잡힘)
+
+        누운 사람에는 기준을 따로 쓴다
+        ------------------------------
+        바닥에 쓰러진 사람은 관절 절반이 가려지고 눌려 보여 신뢰도가 낮다.
+        실측(작은 맵 4런)에서 3런을 놓쳤고, 기각 사유는 거의 전부 키포인트였다
+        — 15초에 86건이 몰린 구간도 있었다. 보고 있으면서 프레임마다 버린
+        것이다. 하필 이 사람이 최우선 등급(L1 Critical)이다.
+
+        서 있는 사람은 박스가 세로로 길고 누운 사람은 가로로 길다. 이 판단에는
+        키포인트가 필요 없으므로, 키포인트로 걸러진 것을 키포인트로 되살리는
+        순환에 빠지지 않는다.
+
+        다만 검사를 없애지는 않는다. 개수를 줄이는 대신 신뢰도 문턱도 같이
+        낮춰 '사람다움' 신호는 계속 요구한다. 그냥 통과시키면 이 관문이 막아
+        주던 벽 오탐이 돌아온다 — 뒤의 ②③ 은 벽 판별 능력이 검증된 적이
+        없다. ① 이 먼저 쳐내서 실행된 적조차 없기 때문이다(기각 0건).
         """
+        w, h = float(x2 - x1), float(y2 - y1)
+
         # ① 키포인트 신뢰도 — 가장 강한 신호
         if kconf is not None:
-            n_valid = int((kconf >= self.min_kpt_conf).sum())
-            if n_valid < self.min_valid_kpts:
+            lying_box = h > 0.0 and (w / h) >= self.lying_aspect
+            need  = self.lying_min_kpts if lying_box else self.min_valid_kpts
+            floor = self.lying_kpt_conf if lying_box else self.min_kpt_conf
+            n_valid = int((kconf >= floor).sum())
+            if n_valid < need:
                 return False, 'kpt'
 
         # ② 박스 크기 상식 범위
-        w, h = float(x2 - x1), float(y2 - y1)
         diag = math.hypot(w, h)
         if not (self.min_box_diag_px <= diag <= self.max_box_diag_px):
             return False, 'geom'
