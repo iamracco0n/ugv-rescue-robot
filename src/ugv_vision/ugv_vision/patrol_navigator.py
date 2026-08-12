@@ -496,6 +496,12 @@ class PatrolNavigator(Node):
         self.room_leave_min_area = float(self.get_parameter('room_leave_min_area').value)
         self._room_leaves        = 0      # 덜 보고 나간 횟수
         self._room_left_area     = 0.0    # 그때 남긴 미관측 합계 m^2
+        self._t_start            = None   # 첫 계측 시각(경과 시간 기준점)
+        # 덜 보고 나온 방들의 중심. 다시 들어오면 왕복한 것이다.
+        # 왕복이야말로 진짜 낭비다 — 한 번에 안 끝내서 오가는 것이므로.
+        self._left_rooms         = []     # [(cx, cy, 재진입횟수)]
+        self._room_reentries     = 0
+        self._cur_room           = None   # 직전에 있던 방 중심(바뀜 감지용)
         self.done_frontier_cells = int(self.get_parameter('done_frontier_cells').value)
         self.done_unseen_area    = float(self.get_parameter('done_unseen_area').value)
         self.done_unseen_frac    = float(self.get_parameter('done_unseen_frac').value)
@@ -1372,7 +1378,16 @@ class PatrolNavigator(Node):
         self._last_goal_kind = ('미탐사 경계' if best_kind == 'frontier'
                                 else '미관측 구역')
         if best is not None and self.room_leave_log:
-            self._check_room_leave(best[0], best[1], rx, ry)
+            # best 는 (goal, 프론티어중심) 이라 좌표는 best[0] 안에 있다.
+            # 계측이 수색을 죽이면 안 된다 — 실제로 여기서 낸 TypeError 로
+            # 순찰 노드가 죽어 3런이 목표 0회로 날아갔다. 재는 코드의
+            # 실패는 재는 것만 멈추고 임무는 계속돼야 한다.
+            try:
+                self._check_room_leave(best[0][0], best[0][1], rx, ry)
+            except Exception as e:                      # noqa: BLE001
+                if self.room_leave_log:
+                    self.room_leave_log = False
+                    self.get_logger().error(f'[방 이탈] 계측 중단 — {e!r}')
         return best
 
     def _check_room_leave(self, gx, gy, rx, ry):
@@ -1415,7 +1430,32 @@ class PatrolNavigator(Node):
             return
         er = max(1, int(round(self.room_erode_m / res)))
         room = segment_room(free, here[0], here[1], er)
-        if room is None or room[there[0], there[1]]:
+        if room is None:
+            return
+        if self._t_start is None:
+            self._t_start = self._now()
+        elapsed = self._now() - self._t_start
+
+        # 지금 있는 방의 중심(월드 좌표). 방을 알아보는 이름표로 쓴다.
+        ys, xs = np.nonzero(room)
+        cx = ox + (float(xs.mean()) + 0.5) * res
+        cy = oy + (float(ys.mean()) + 0.5) * res
+
+        # 방이 바뀌었나. 바뀌었고 그게 예전에 덜 보고 나온 방이면 왕복이다.
+        if self._cur_room is None or math.hypot(
+                cx - self._cur_room[0], cy - self._cur_room[1]) > 3.0:
+            self._cur_room = (cx, cy)
+            for i, (lx, ly, cnt) in enumerate(self._left_rooms):
+                if math.hypot(cx - lx, cy - ly) <= 3.0:
+                    self._left_rooms[i] = (lx, ly, cnt + 1)
+                    self._room_reentries += 1
+                    self.get_logger().warn(
+                        f'[방 재진입] {elapsed:.0f}s — 덜 보고 나왔던 방으로 '
+                        f'되돌아옴 (이 방 {cnt + 1}번째) / 누적 '
+                        f'{self._room_reentries}회')
+                    break
+
+        if room[there[0], there[1]]:
             return          # 목표가 같은 방 안이면 나가는 게 아니다
         min_cells = max(1, int(round(self.room_leave_min_area / (res * res))))
         left = actionable_cells(room & ~seen_ok, min_cells)
@@ -1424,9 +1464,17 @@ class PatrolNavigator(Node):
         area = float(left) * res * res
         self._room_leaves += 1
         self._room_left_area += area
+        if not any(math.hypot(cx - lx, cy - ly) <= 3.0
+                   for lx, ly, _ in self._left_rooms):
+            self._left_rooms.append((cx, cy, 0))
+        # 경과 시간을 같이 남긴다. 수색 초반에는 지도가 통째로 미관측이라
+        # 방에 들어가자마자 나와도 '크게 남기고 나감' 으로 잡힌다. 그때
+        # 나가는 건 오히려 정상이다 — 아직 못 가본 방이 널렸으니까.
+        # 초반과 후반을 갈라 봐야 무엇을 고칠지 정해진다.
         self.get_logger().warn(
-            f'[방 이탈] 미관측 {area:.1f}m² 남기고 다른 방으로 — '
-            f'누적 {self._room_leaves}회 / {self._room_left_area:.1f}m²')
+            f'[방 이탈] {elapsed:.0f}s — 미관측 {area:.1f}m² 남기고 다른 방으로 '
+            f'— 누적 {self._room_leaves}회 / {self._room_left_area:.1f}m² '
+            f'/ 재진입 {self._room_reentries}회')
 
     def _score_cands(self, cands, rx, ry, bounds):
         """주어진 범위 안에서 가장 좋은 후보를 고른다."""
