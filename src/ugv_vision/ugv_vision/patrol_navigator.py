@@ -371,6 +371,21 @@ class PatrolNavigator(Node):
         # 방이 생기고, 조난자를 지나친다. 카메라가 실제로 훑은 격자를 따로
         # 관리해서, 라이다 프론티어가 없어도 안 본 구역으로 계속 들어간다.
         self.declare_parameter('cam_see_range', 4.5)        # 유효 관측 거리(m)
+        # 이 거리보다 가까운 바닥은 '봤음' 으로 치지 않는다.
+        #
+        # 카메라 높이 0.5m, 수직 FOV 48.9도라 수평 조준이면 화면 아래끝이
+        # 바닥과 만나는 지점이 1.1m 다. 그보다 가까운 바닥은 아예 안 찍힌다.
+        # 누운 사람 검출은 실측으로 2.3m 부터 됐다(2.3m 보다 가까운 성공
+        # 0건 / 32건 중).
+        #
+        # 그런데 지금까지 0.3m 부터 칠하고 있었다. 로봇이 지나가면서 주변
+        # 띠를 '봤음' 으로 칠하는데 실제로는 그 바닥을 한 번도 못 본 것이다.
+        # 누운 사람이 거기 있으면 영원히 못 찾는다 — 이미 봤다고 표시돼
+        # 다시 안 가기 때문이다.
+        #
+        # 판정이 센서가 못 하는 것을 세면 안 된다. 미탐사 경계·미관측 조각
+        # 에서 여섯 번 겪은 것과 같은 종류의 어긋남이다.
+        self.declare_parameter('cam_see_min', 0.3)
         self.declare_parameter('cam_fov_rad',   1.089)      # 카메라 수평 FOV
         # 미관측 군집 최소 크기. 카메라 FOV 스윕은 사방에 자잘한 미관측
         # 조각을 항상 남긴다. 작게 잡으면 '주변 미관측' 이 영영 비지 않아
@@ -494,6 +509,7 @@ class PatrolNavigator(Node):
         self.escape_cooldown   = float(self.get_parameter('escape_cooldown_s').value)
         self.escape_max_streak = int(self.get_parameter('escape_max_streak').value)
         self.cam_range         = float(self.get_parameter('cam_see_range').value)
+        self.cam_min           = float(self.get_parameter('cam_see_min').value)
         self.cam_fov           = float(self.get_parameter('cam_fov_rad').value)
         self.visual_min        = int(self.get_parameter('visual_min_size').value)
         self.visual_min_local  = int(self.get_parameter('visual_min_local').value)
@@ -790,6 +806,9 @@ class PatrolNavigator(Node):
         for i in range(n_rays):
             a = cam - half + i * self.cam_fov / (n_rays - 1)
             ca, sa = math.cos(a), math.sin(a)
+            # 가까운 바닥은 카메라에 안 잡히므로 칠하지 않는다.
+            # 다만 벽 판정은 로봇 바로 앞부터 해야 한다 — 안 그러면
+            # 바로 앞 벽을 건너뛰고 그 너머를 봤다고 칠한다.
             d = 0.3
             while d <= self.cam_range:
                 ix = int((rx + d * ca - ox) / res)
@@ -798,6 +817,9 @@ class PatrolNavigator(Node):
                     break
                 if occ[iy, ix]:
                     break                      # 벽 뒤는 못 본다
+                if d < self.cam_min:
+                    d += step
+                    continue                   # 너무 가까워 화면에 안 들어옴
                 self._seen[iy, ix] |= dir_bit(a + math.pi)
                 d += step
 

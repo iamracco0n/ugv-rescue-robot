@@ -218,6 +218,11 @@ class TargetManager(Node):
         self._inspect_samples: list[tuple[float, float]] = []
         self._ghost_spots: list[list] = []     # [x, y, 횟수]
         # 몇 번 반복돼야 그 자리를 막을지. 0 이면 이 기능이 꺼진다.
+        # 탐색 중 포탑 기본 각도(rad). 양수가 아래를 본다.
+        # 0 이면 수평 — 지금까지의 동작이다. 바닥에 누운 사람을 놓치는
+        # 원인으로 의심되어 스위치로 뺀다. 관절 한계는 +-0.52 다.
+        self.declare_parameter('search_pitch', 0.0)
+        self.search_pitch = float(self.get_parameter('search_pitch').value)
         self.declare_parameter('ghost_need', GHOST_NEED)
         self.ghost_need = int(self.get_parameter('ghost_need').value)
         self._inspect_settled_t: float | None = None   # 정지+조준이 붙은 시각
@@ -335,7 +340,21 @@ class TargetManager(Node):
         return slewed
 
     def _pitch_to_neutral(self) -> float:
-        raw = KP_SRCH * (0.0 - self.turret_pitch)
+        """탐색 중 포탑을 기본 각도로 되돌린다.
+
+        기본값이 0(수평)이면 바닥에 누운 사람을 놓친다. 카메라 높이 0.5m,
+        수직 FOV 48.9도라 화면 아래끝이 바닥과 만나는 지점이 1.1m 다.
+        그보다 가까운 바닥은 아예 안 찍힌다.
+
+        실측: 누운 조난자 검출 성공 거리가 2.3~4.9m 에 몰려 있고 2.3m 보다
+        가까운 성공이 한 건도 없다(서있는 사람은 3.5~5.5m). 실제 사진에서도
+        2m 앞 누운 사람이 신발과 다리만 화면에 걸리고 몸통·머리는 아래로
+        잘려 검출이 안 됐다.
+
+        아래로 조금 기울이면 그 지점이 앞으로 당겨져 가까운 거리에서도
+        몸 전체가 들어온다. 양수가 아래 방향이다(Y축 회전).
+        """
+        raw = KP_SRCH * (self.search_pitch - self.turret_pitch)
         return self._apply_pitch_slew(raw)
 
     def _cmd_turret(self, yaw_vel, pitch_vel, z_flag=0.0):
