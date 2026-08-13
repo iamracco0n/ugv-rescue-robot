@@ -168,6 +168,9 @@ def generate_launch_description():
     # 방을 덜 보고 나가는 것을 줄이려는 것인데, 세게 걸면 반대로 방에서
     # 못 나오는 고장이 난다. 0 부터 올려 가며 재기 위해 열어 둔다.
     ROOM_BONUS = float(os.environ.get('UGV_ROOM_BONUS', '0.0'))
+    # 누운 사람 관문. 기본값은 완화 없음(=서있는 사람과 같은 기준).
+    LYING_KPTS = int(os.environ.get('UGV_LYING_KPTS', '6'))
+    LYING_CONF = float(os.environ.get('UGV_LYING_CONF', '0.50'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
@@ -344,7 +347,16 @@ def generate_launch_description():
             Node(package='ugv_vision', executable='yolo_pose_node',
                  name='yolo_pose_node', namespace=name,
                  remappings=tf_remap,
-                 parameters=[{'use_sim_time': True}], output='screen'),
+                 parameters=[{'use_sim_time': True,
+                              # 누운 사람 관문 완화 스위치.
+                              # 큰 월드에서 못 찾는 조난자 두 명이 둘 다
+                              # 누운 자세다(침대 41%, 바닥 70%. 나머지
+                              # 다섯은 89~100%). 작은 맵에는 누운 사람이
+                              # 하나뿐이라 신호가 묻혔었다 — 여기서 다시
+                              # 잰다.
+                              'lying_min_kpts': LYING_KPTS,
+                              'lying_kpt_conf': LYING_CONF}],
+                 output='screen'),
             Node(package='ugv_vision', executable='target_manager_node',
                  name='target_manager_node', namespace=name,
                  remappings=tf_remap,
