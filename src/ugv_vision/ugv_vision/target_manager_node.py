@@ -218,10 +218,21 @@ class TargetManager(Node):
         self._inspect_samples: list[tuple[float, float]] = []
         self._ghost_spots: list[list] = []     # [x, y, 횟수]
         # 몇 번 반복돼야 그 자리를 막을지. 0 이면 이 기능이 꺼진다.
-        # 탐색 중 포탑 기본 각도(rad). 양수가 아래를 본다.
-        # 0 이면 수평 — 지금까지의 동작이다. 바닥에 누운 사람을 놓치는
-        # 원인으로 의심되어 스위치로 뺀다. 관절 한계는 +-0.52 다.
-        self.declare_parameter('search_pitch', 0.0)
+        # 탐색 중 포탑 기본 각도(rad). 양수가 아래를 본다. 관절 한계 +-0.52.
+        #
+        # 0(수평)이 기본이었는데 바닥에 누운 사람을 놓치는 원인이었다.
+        # 큰 월드 2머신 18런으로 0.20(아래 11.5도)과 비교했다.
+        #
+        #   누운 3명 발견률   0.20: 21/27(78%)   0(수평): 14/27(52%)
+        #   서있는 사람       양쪽 9/9 — 위쪽 시야가 줄어도 손해가 없었다
+        #   누움 최소 검출거리 0.20: 1.3m        0: 2.0m
+        #   유령             1건/9런 vs 0건/9런 (차이 없음)
+        #   머신별로도 둘 다 같은 방향(메인 6/12->11/12, 오로라 8/15->10/15)
+        #
+        # 최소 검출 거리가 짧아진 것이 메커니즘 증거다. 화면 아래끝이
+        # 바닥과 만나는 지점이 1.10m -> 0.69m 로 당겨져 가까운 거리에서
+        # 몸이 안 잘린다.
+        self.declare_parameter('search_pitch', 0.20)
         self.search_pitch = float(self.get_parameter('search_pitch').value)
         self.declare_parameter('ghost_need', GHOST_NEED)
         self.ghost_need = int(self.get_parameter('ghost_need').value)
