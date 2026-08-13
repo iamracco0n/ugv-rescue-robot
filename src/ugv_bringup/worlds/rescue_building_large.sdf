@@ -651,9 +651,9 @@
     </include>
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Standing%20person</uri>
-      <name>victim_lying_e</name>
+      <name>victim_corridor_e</name>
       <static>true</static>
-      <pose>24.0 0.5 0.15 0 -1.5708 0.0</pose>
+      <pose>24.0 0.5 0 0 0 3.14</pose>
     </include>
     <model name="debris_occluder">
       <static>true</static>
