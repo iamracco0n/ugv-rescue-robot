@@ -171,6 +171,13 @@ def generate_launch_description():
     # 누운 사람 관문. 기본값은 완화 없음(=서있는 사람과 같은 기준).
     LYING_KPTS = int(os.environ.get('UGV_LYING_KPTS', '6'))
     LYING_CONF = float(os.environ.get('UGV_LYING_CONF', '0.50'))
+    # YOLO 박스 신뢰도 하한. 검출은 두 단계인데 이게 1단계다.
+    #   1단계  YOLO 가 사람 박스를 만든다        <- det_conf
+    #   2단계  그 박스의 관절점을 검사한다        <- lying_* 관문
+    # 1단계에서 버려진 것은 2단계에 오지 않는다. 실측으로 누운 조난자를
+    # 놓친 런은 거의 전부 '후보로 잡은 적도 없음' 이었고 '후보는 잡았는데
+    # 관문에서 떨어짐' 은 0건이었다 — 2단계를 아무리 풀어도 소용없던 이유다.
+    DET_CONF = float(os.environ.get('UGV_DET_CONF', '0.50'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
@@ -355,7 +362,8 @@ def generate_launch_description():
                               # 하나뿐이라 신호가 묻혔었다 — 여기서 다시
                               # 잰다.
                               'lying_min_kpts': LYING_KPTS,
-                              'lying_kpt_conf': LYING_CONF}],
+                              'lying_kpt_conf': LYING_CONF,
+                              'det_conf': DET_CONF}],
                  output='screen'),
             Node(package='ugv_vision', executable='target_manager_node',
                  name='target_manager_node', namespace=name,
