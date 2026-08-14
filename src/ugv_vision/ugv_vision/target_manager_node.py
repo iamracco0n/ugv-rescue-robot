@@ -223,6 +223,18 @@ class TargetManager(Node):
         # 0(수평)이 기본이었는데 바닥에 누운 사람을 놓치는 원인이었다.
         # 큰 월드 2머신 18런으로 0.20(아래 11.5도)과 비교했다.
         #
+        # 그 뒤 0.10 / 0.20 / 0.30 을 오로라 18런(값당 6런)으로 훑어 0.10 이
+        # 최적임을 확인했다. 처음 고른 0.20 이 최적은 아니었다.
+        #
+        #   각도    누움      서있음    7/7
+        #   0.10   18/18    18/18    6/6    <- 채택
+        #   0.20   16/18    16/18    4/6
+        #   0.30   15/18    17/18    4/6
+        #
+        # 0.30 은 위쪽 시야가 7.3도까지 줄어 오히려 나빠진다. 0.10 이면
+        # 18.7도를 남기면서 화면 아래끝이 1.10m -> 0.86m 로 당겨진다.
+        #
+        # 아래는 0.20 을 처음 채택할 때의 근거다(수평 대비).
         #   누운 3명 발견률   0.20: 21/27(78%)   0(수평): 14/27(52%)
         #   서있는 사람       양쪽 9/9 — 위쪽 시야가 줄어도 손해가 없었다
         #   누움 최소 검출거리 0.20: 1.3m        0: 2.0m
@@ -232,7 +244,7 @@ class TargetManager(Node):
         # 최소 검출 거리가 짧아진 것이 메커니즘 증거다. 화면 아래끝이
         # 바닥과 만나는 지점이 1.10m -> 0.69m 로 당겨져 가까운 거리에서
         # 몸이 안 잘린다.
-        self.declare_parameter('search_pitch', 0.20)
+        self.declare_parameter('search_pitch', 0.10)
         self.search_pitch = float(self.get_parameter('search_pitch').value)
         self.declare_parameter('ghost_need', GHOST_NEED)
         self.ghost_need = int(self.get_parameter('ghost_need').value)

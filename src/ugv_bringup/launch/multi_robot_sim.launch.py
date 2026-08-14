@@ -162,7 +162,7 @@ def generate_launch_description():
     # 개선 항목 스위치 — 하나씩 켜 가며 재기 위한 것(ablation).
     # 큰 월드 2대에서 조건당 13~14런을 재 봤고 셋 다 base 와 구분되지 않았다.
     # 기본값을 끔으로 되돌린다. 스위치는 남겨 둔다 — 되켜서 재보려면 필요하다.
-    SEEN_DIRS = int(os.environ.get('UGV_SEEN_DIRS', '1'))
+    SEEN_DIRS = int(os.environ.get('UGV_SEEN_DIRS', '2'))
     GHOST_NEED = int(os.environ.get('UGV_GHOST_NEED', '0'))
     # 지금 있는 방 안의 후보에 얹는 점수(m^2). 0 이면 꺼짐(=지금 동작).
     # 방을 덜 보고 나가는 것을 줄이려는 것인데, 세게 걸면 반대로 방에서
@@ -180,7 +180,7 @@ def generate_launch_description():
     DET_CONF = float(os.environ.get('UGV_DET_CONF', '0.50'))
     # 탐색 중 포탑 기본 각도(rad). 양수가 아래. 0 이면 지금까지의 수평.
     # 카메라 높이 0.5m·수직 FOV 48.9도라 수평이면 1.1m 안쪽 바닥이 안 찍힌다.
-    SEARCH_PITCH = float(os.environ.get('UGV_SEARCH_PITCH', '0.0'))
+    SEARCH_PITCH = float(os.environ.get('UGV_SEARCH_PITCH', '0.10'))
     # 이 거리보다 가까운 바닥은 '봤음' 으로 치지 않는다. 0.3 이 기존 동작.
     # 카메라가 물리적으로 못 보는 띠를 '봤음' 으로 칠하면, 거기 누운 사람은
     # 영원히 못 찾는다(이미 봤다고 표시돼 다시 안 감).
