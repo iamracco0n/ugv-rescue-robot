@@ -173,10 +173,54 @@ class YoloPoseNode(Node):
 
         self.create_timer(15.0, self._log_rejects)
 
+        # ── 눈멂 감시 ────────────────────────────────────────────────
+        # 프레임은 들어오는데 사람 박스가 하나도 안 나오는 상태를 알아챈다.
+        #
+        # 2대 런에서 한 대만 이렇게 되는 일이 실제로 있었다. 그 로봇은 목표를
+        # 28회 내며 자기 구역을 멀쩡히 돌았고, 카메라 토픽도 살아 있었다.
+        # 다만 검출이 0 이라 그 구역 조난자 4명을 통째로 놓쳤다. 다른 로봇이
+        # 정상이라 런은 정상처럼 보였고, 로그 전체를 보는 검사도 통과했다.
+        #
+        # 조용해서 위험하다 — 실기라면 로봇 한 대가 눈먼 채 구역을 헛돌아도
+        # 아무도 모른다. 그래서 노드가 스스로 알린다.
+        #
+        # '프레임은 오는데 결과가 없는' 것만 잡는다. 프레임 자체가 안 오면
+        # 그건 다른 문제(브리지·동기화)이고 이미 다른 데서 티가 난다.
+        self.declare_parameter('blind_warn_s', 60.0)
+        self.blind_warn_s = float(self.get_parameter('blind_warn_s').value)
+        self._frames_seen = 0
+        self._last_detect_t = None
+        self._blind_warned = False
+        self.create_timer(10.0, self._check_blind)
+
         self.get_logger().info(
             f'YoloPoseNode 시작 — RGB+Depth 동기화 구독 중 '
             f'(오탐게이트: conf≥{self.det_conf}, 키포인트 {self.min_valid_kpts}개'
             f'≥{self.min_kpt_conf}, depth오차≤{self.depth_tol:.0%})')
+
+    def _check_blind(self):
+        """프레임은 들어오는데 사람 박스가 전혀 안 나오면 경고한다.
+
+        기각도 검출로 친다 — 박스가 생겼다가 관문에서 떨어진 것은 카메라가
+        살아 있다는 뜻이다. 여기서 잡으려는 것은 '박스 자체가 없는' 상태다.
+        """
+        if self._frames_seen < 30:
+            return                      # 아직 기동 중
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if self._last_detect_t is None:
+            self._last_detect_t = now
+            return
+        idle = now - self._last_detect_t
+        if idle < self.blind_warn_s:
+            self._blind_warned = False
+            return
+        if self._blind_warned:
+            return                      # 한 번만 알린다(회복하면 다시 켜짐)
+        self._blind_warned = True
+        self.get_logger().error(
+            f'[눈멂 의심] 프레임 {self._frames_seen}장을 받았는데 '
+            f'{idle:.0f}s 동안 사람 박스가 하나도 없다. '
+            f'카메라 렌더나 추론이 죽었을 수 있다')
 
     def _log_rejects(self):
         """기각 통계 — 게이트가 과하게/모자라게 걸리는지 튜닝용."""
@@ -474,6 +518,7 @@ class YoloPoseNode(Node):
 
         frame     = cv2.resize(frame,     (640, 480))
         depth_img = cv2.resize(depth_img, (640, 480), interpolation=cv2.INTER_NEAREST)
+        self._frames_seen += 1
 
         now = time.time()
         fps = 1.0 / max(now - self.prev_time, 1e-6)
@@ -481,6 +526,11 @@ class YoloPoseNode(Node):
 
         results  = self.model(frame, verbose=False, device=self.device,
                               conf=self.det_conf)
+        # 박스가 하나라도 나오면 '보고 있다' 로 친다. 관문에서 떨어지는
+        # 것은 상관없다 — 여기서 잡으려는 것은 박스 자체가 없는 상태다.
+        if any(getattr(r, 'boxes', None) is not None and len(r.boxes) > 0
+               for r in results):
+            self._last_detect_t = self.get_clock().now().nanoseconds * 1e-9
         best     = None
         min_dx   = float('inf')
 
