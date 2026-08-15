@@ -26,7 +26,15 @@ from visualization_msgs.msg import Marker, MarkerArray
 from ugv_msgs.msg import TargetDetection
 
 # ── 튜닝 파라미터 ──────────────────────────────────────────────────────
-SEARCH_AMP   = math.radians(50)  # 사인파 폴백 진폭
+# 사인파 폴백 스캔. 파라미터로 열어 두었다(search_amp_deg / search_omega).
+#
+# 진폭이 좁으면 옆으로 지나친 조난자를 영영 못 본다. 50도면 카메라 FOV
+# (+-31도)를 더해도 전방 162도만 훑는다.
+#
+# 각속도는 지금도 한 지점이 2.08초(약 27프레임) 화면에 머문다 — 검출에는
+# 충분해 보인다. 그래도 검출 창이 좁아서(누운 사람 2.1~4.9m) 스쳐 지나가는
+# 일이 있으므로 같이 잰다.
+SEARCH_AMP   = math.radians(50)  # 사인파 폴백 진폭(기본값)
 SEARCH_OMEGA = 0.6               # 사인파 각속도 (rad/s) — 낮출수록 위치 오차 줄어듦
 KP_SRCH      = 2.0              # 스캔 P 게인 (rad/s per rad)
 
@@ -244,6 +252,13 @@ class TargetManager(Node):
         # 최소 검출 거리가 짧아진 것이 메커니즘 증거다. 화면 아래끝이
         # 바닥과 만나는 지점이 1.10m -> 0.69m 로 당겨져 가까운 거리에서
         # 몸이 안 잘린다.
+        # 사인파 스캔 범위·속도. 검출 창이 좁아 스쳐 지나가는 일이 있어
+        # 재보려고 열어 둔다. 기본값은 지금까지의 동작과 같다.
+        self.declare_parameter('search_amp_deg', 50.0)
+        self.declare_parameter('search_omega', 0.6)
+        self.search_amp = math.radians(
+            float(self.get_parameter('search_amp_deg').value))
+        self.search_omega = float(self.get_parameter('search_omega').value)
         self.declare_parameter('search_pitch', 0.10)
         self.search_pitch = float(self.get_parameter('search_pitch').value)
         self.declare_parameter('ghost_need', GHOST_NEED)
@@ -761,7 +776,7 @@ class TargetManager(Node):
                     self._scan_arrive_t = None  # 이동 중 → 도달 타이머 리셋
             else:
                 # 블라인드코너 없음 → 사인파 폴백
-                target_yaw = SEARCH_AMP * math.sin(now_sec * SEARCH_OMEGA)
+                target_yaw = self.search_amp * math.sin(now_sec * self.search_omega)
 
         yaw_vel   = KP_SRCH * (target_yaw - self.turret_yaw)
         pitch_vel = self._pitch_to_neutral()

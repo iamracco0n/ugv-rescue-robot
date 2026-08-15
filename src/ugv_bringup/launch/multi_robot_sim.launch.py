@@ -181,6 +181,10 @@ def generate_launch_description():
     # 탐색 중 포탑 기본 각도(rad). 양수가 아래. 0 이면 지금까지의 수평.
     # 카메라 높이 0.5m·수직 FOV 48.9도라 수평이면 1.1m 안쪽 바닥이 안 찍힌다.
     SEARCH_PITCH = float(os.environ.get('UGV_SEARCH_PITCH', '0.10'))
+    # 사인파 스캔 범위(도)와 속도(rad/s). 검출 창이 좁아(누운 사람 2.1~4.9m)
+    # 스쳐 지나가는 일이 있어 재보려고 열어 둔다.
+    SEARCH_AMP = float(os.environ.get('UGV_SEARCH_AMP', '50.0'))
+    SEARCH_OMEGA = float(os.environ.get('UGV_SEARCH_OMEGA', '0.6'))
     # 이 거리보다 가까운 바닥은 '봤음' 으로 치지 않는다. 0.3 이 기존 동작.
     # 카메라가 물리적으로 못 보는 띠를 '봤음' 으로 칠하면, 거기 누운 사람은
     # 영원히 못 찾는다(이미 봤다고 표시돼 다시 안 감).
@@ -376,7 +380,9 @@ def generate_launch_description():
                  name='target_manager_node', namespace=name,
                  remappings=tf_remap,
                  parameters=common + [{'ghost_need': GHOST_NEED,
-                                       'search_pitch': SEARCH_PITCH}],
+                                       'search_pitch': SEARCH_PITCH,
+                                       'search_amp_deg': SEARCH_AMP,
+                                       'search_omega': SEARCH_OMEGA}],
                  output='screen'),
             Node(package='ugv_vision', executable='fire_detection_node',
                  name='fire_detection_node', namespace=name,
