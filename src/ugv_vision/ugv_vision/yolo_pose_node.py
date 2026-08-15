@@ -186,8 +186,18 @@ class YoloPoseNode(Node):
         #
         # '프레임은 오는데 결과가 없는' 것만 잡는다. 프레임 자체가 안 오면
         # 그건 다른 문제(브리지·동기화)이고 이미 다른 데서 티가 난다.
-        self.declare_parameter('blind_warn_s', 60.0)
-        self.blind_warn_s = float(self.get_parameter('blind_warn_s').value)
+        # '한동안 못 봤다' 가 아니라 '한 번도 못 봤다' 로 판정한다.
+        #
+        # 처음엔 60초 동안 박스가 없으면 경고하게 했는데 전 런에서 9~13건씩
+        # 찍혔다 — 7/7 완주한 정상 런도 마찬가지였다. 큰 월드에서 복도나 빈
+        # 방을 지날 때 1분 넘게 아무도 안 보이는 것은 당연하다. 임계값을
+        # 측정 없이 추측으로 잡은 탓이다.
+        #
+        # 실제로 잡아야 할 고장은 '런 내내 검출 0' 이었다. 그 로봇은 프레임을
+        # 계속 받으면서도 사람 박스를 한 장도 못 만들었다. 한 번이라도 봤으면
+        # 카메라는 살아 있는 것이므로, 이 조건은 헛경보가 날 수 없다.
+        self.declare_parameter('blind_frames', 1500)   # 약 2분(13Hz 기준)
+        self.blind_frames = int(self.get_parameter('blind_frames').value)
         self._frames_seen = 0
         self._last_detect_t = None
         self._blind_warned = False
@@ -199,28 +209,25 @@ class YoloPoseNode(Node):
             f'≥{self.min_kpt_conf}, depth오차≤{self.depth_tol:.0%})')
 
     def _check_blind(self):
-        """프레임은 들어오는데 사람 박스가 전혀 안 나오면 경고한다.
+        """프레임을 충분히 받고도 사람 박스를 한 번도 못 만들면 경고한다.
 
         기각도 검출로 친다 — 박스가 생겼다가 관문에서 떨어진 것은 카메라가
         살아 있다는 뜻이다. 여기서 잡으려는 것은 '박스 자체가 없는' 상태다.
+
+        한 번이라도 봤으면 다시는 경고하지 않는다. 그래서 헛경보가 날 수
+        없다 — '한동안 못 봤다' 로 판정하던 때는 정상 런에도 런당 9~13건씩
+        찍혔다.
         """
-        if self._frames_seen < 30:
-            return                      # 아직 기동 중
-        now = self.get_clock().now().nanoseconds * 1e-9
-        if self._last_detect_t is None:
-            self._last_detect_t = now
-            return
-        idle = now - self._last_detect_t
-        if idle < self.blind_warn_s:
-            self._blind_warned = False
-            return
         if self._blind_warned:
-            return                      # 한 번만 알린다(회복하면 다시 켜짐)
+            return                          # 이미 알렸다
+        if self._last_detect_t is not None:
+            return                          # 한 번이라도 봤으면 정상
+        if self._frames_seen < self.blind_frames:
+            return                          # 아직 판단할 만큼 안 봤다
         self._blind_warned = True
         self.get_logger().error(
-            f'[눈멂 의심] 프레임 {self._frames_seen}장을 받았는데 '
-            f'{idle:.0f}s 동안 사람 박스가 하나도 없다. '
-            f'카메라 렌더나 추론이 죽었을 수 있다')
+            f'[눈멂 의심] 프레임 {self._frames_seen}장을 받는 동안 사람 박스를 '
+            f'한 번도 못 만들었다. 카메라 렌더나 추론이 죽었을 수 있다')
 
     def _log_rejects(self):
         """기각 통계 — 게이트가 과하게/모자라게 걸리는지 튜닝용."""
