@@ -287,7 +287,28 @@ class TargetManager(Node):
         self.create_timer(0.05, self.control_loop)
         self.create_timer(0.1,  self._publish_turret_arrow)
         self.create_timer(1.0,  self.republish_markers)
+
+        # ── 궤적 기록(진단 전용) ──────────────────────────────────────
+        # 로그만 남긴다. 판단도 제어도 하지 않는다.
+        #
+        # 왜 필요한가: 조난자를 놓친 런에서 '안 갔다(커버리지)' 와 '갔는데 못
+        # 알아봤다(인식)' 는 처방이 정반대인데, 지금 로그로는 갈리지 않는다.
+        # 탐사 목표는 '가려던 곳' 이지 '간 곳' 이 아니고, 오탐 게이트 기각은
+        # 15초마다 개수만 찍혀 어느 자리에서 났는지 알 수 없다.
+        #
+        # 1Hz 로 자세를 남겨 두면 기각이 난 15초 구간에 로봇이 어디 있었는지
+        # 붙일 수 있다. 그 사이 로봇은 멀리 못 가므로 자리 특정에 충분하다.
+        # 끄면 이 분석이 통째로 불가능해지므로 기본은 켠 채로 둔다.
+        self.declare_parameter('trace_pose', True)
+        if bool(self.get_parameter('trace_pose').value):
+            self.create_timer(1.0, self._trace_pose)
+
         self.get_logger().info('TargetManager v7 시작 — 블라인드코너 지능형 스캔')
+
+    def _trace_pose(self):
+        """1Hz 로봇 자세 기록 — 기각·미발견을 자리에 붙이기 위한 것."""
+        x, y, th = self._map_frame_robot_pose()
+        self.get_logger().info(f'[궤적] ({x:.2f},{y:.2f}) yaw={th:.2f}')
 
     # ── TF2 유틸 ──────────────────────────────────────────────────────
 

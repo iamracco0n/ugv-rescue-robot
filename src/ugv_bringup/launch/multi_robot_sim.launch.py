@@ -189,6 +189,12 @@ def generate_launch_description():
     # 카메라가 물리적으로 못 보는 띠를 '봤음' 으로 칠하면, 거기 누운 사람은
     # 영원히 못 찾는다(이미 봤다고 표시돼 다시 안 감).
     CAM_MIN = float(os.environ.get('UGV_CAM_MIN', '0.3'))
+    # 이 거리 안에서만 '봤음' 으로 친다. 4.5 가 기존 동작.
+    #
+    # 줄이면 탐사가 더 바싹 붙어야 그 칸을 봤다고 인정한다. 느려지는 대신
+    # 꼼꼼해진다. 남서 방 바닥에 누운 조난자(lying_s2)가 유일하게 5m 밖에서
+    # 안 잡히고, 유효 50런에서 못 찾은 9런이 사실상 전부 이 한 명이었다.
+    CAM_RANGE = float(os.environ.get('UGV_CAM_RANGE', '4.5'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
@@ -411,6 +417,7 @@ def generate_launch_description():
                               'seen_min_dirs': SEEN_DIRS,
                               'room_bonus': ROOM_BONUS,
                               'cam_see_min': CAM_MIN,
+                              'cam_see_range': CAM_RANGE,
                               'explore_bounds': bounds_for(i, len(robots)),
                               # 건물 전체 — 내 구역을 끝내면 여기까지 넓혀
                               # 동료를 돕는다. 안 주면 자기 몫만 하고 논다.

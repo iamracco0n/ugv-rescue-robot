@@ -24,6 +24,19 @@ _FOCAL_PX   = 535.0
 _BODY_DIAG  = math.sqrt(1.7**2 + 0.4**2)
 _CAM_FOV    = 1.089        # 수평 화각[rad] — urdf 와 일치시킬 것
 
+
+def bearing_from_pixel(cx: float, turret_yaw: float,
+                       fov: float = _CAM_FOV, width: float = 640.0) -> float:
+    """픽셀 가로좌표 → 로봇 기준 방위[rad].
+
+    부호를 조심해야 한다. 픽셀 x 는 오른쪽이 +, ROS 요는 왼쪽이 + 다. 그대로
+    더하면 좌우가 뒤집힌 채 그럴듯한 값이 나와서 눈치채기 어렵다. 예전에
+    조난자 위치가 2~3m 씩 틀어졌던 원인이 정확히 이것이었다.
+
+    카메라가 포탑 위에 있으므로 포탑 요를 더해야 로봇 기준이 된다.
+    """
+    return turret_yaw - (cx - width / 2.0) / width * fov
+
 # 카메라 광학중심의 지면 높이[m]. urdf 관절 누적:
 #   base_footprint→base_link 0.15 + →turret 0.245 + →gun 0.15 + →camera 0.01
 CAM_HEIGHT_M = 0.555
@@ -139,6 +152,7 @@ class YoloPoseNode(Node):
         self.lying_min_kpts  = int(self.get_parameter('lying_min_kpts').value)
         self.lying_kpt_conf  = float(self.get_parameter('lying_kpt_conf').value)
         self._reject_counts  = {'conf': 0, 'kpt': 0, 'geom': 0, 'depth': 0}
+        self._reject_polar   = []   # 진단용 (거리, 로봇기준 방위, 사유)
 
         # 골격 기하로 자세(누움/앉음)를 판정해 트리아지 모델 결과를 보정할지.
         # 모델이 앉은 자세를 학습하지 않아 휠체어 환자가 L3(정상)로 나왔다.
@@ -237,6 +251,15 @@ class YoloPoseNode(Node):
         self.get_logger().info(
             f'[오탐 게이트] 기각 15s: 키포인트={c.get("kpt",0)} '
             f'박스크기={c.get("geom",0)} depth불일치={c.get("depth",0)}')
+        # 기각이 난 방향·거리도 같이 남긴다. 개수만 봐서는 어느 자리에서
+        # 죽었는지 알 수 없어 처방을 못 고른다. 너무 길어지지 않게 자른다.
+        if self._reject_polar:
+            head = self._reject_polar[:12]
+            body = ' '.join(f'{d}m/{b}rad/{w}' for d, b, w in head)
+            more = len(self._reject_polar) - len(head)
+            self.get_logger().info(
+                f'[기각위치] {body}' + (f' 외 {more}건' if more > 0 else ''))
+            self._reject_polar.clear()
         for k in c:
             c[k] = 0
 
@@ -563,6 +586,15 @@ class YoloPoseNode(Node):
                                             dist_depth, dist_diag)
                 if not ok:
                     self._reject_counts[why] = self._reject_counts.get(why, 0) + 1
+                    # 기각을 자리에 붙이기 위한 기록(진단 전용).
+                    # 픽셀 x 는 오른쪽이 +, ROS 요는 왼쪽이 + 라 부호를 뒤집는다.
+                    # 카메라가 포탑 위에 있으므로 포탑 요를 더해야 로봇 기준이
+                    # 된다. 여기에 1Hz 궤적을 붙이면 월드 좌표가 나온다.
+                    self._reject_polar.append(
+                        (round(dist, 1),
+                         round(bearing_from_pixel(cx, capture_yaw,
+                                                  self.cam_fov), 2),
+                         why))
                     # 기각된 후보는 회색 점선 박스로만 표시 (튜닝용)
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (128, 128, 128), 1)
                     cv2.putText(frame, f'rej:{why}', (x1, y1 - 4),
