@@ -223,6 +223,31 @@ def goal_score(kind, n_cells, dist_m, res, view_r, lam):
     return gain - lam * dist_m
 
 
+def far_first_bonus(in_room, dist_m, coef, cap_m):
+    """같은 방 안에서는 '먼 후보' 를 먼저 가도록 얹는 점수[m^2].
+
+    왜 부호를 뒤집나
+    ----------------
+    기본 점수식은 거리에 페널티를 준다(-lam*d). 그래서 방에 들어가면 입구
+    쪽부터 야금야금 훑고, 안쪽이 조금 남은 상태에서 바깥의 더 큰 덩어리에
+    져서 방을 뜬다. 남은 안쪽은 나중에 순서가 돌아와야 처리된다.
+
+    실측으로 이게 조난자 한 명을 좌우했다. 방2 는 남쪽 다섯 방 중 유일하게
+    내부 칸막이가 있어 문이 주머니 구석에 붙어 있고, 15m 안쪽 끝에 누운
+    조난자가 있다. 그 주머니 y<-11 까지 내려간 런은 조난자를 찾았고
+    (34런 중 33런), 못 내려간 런은 한 번도 못 찾았다(6런 중 0런).
+
+    방 안에서만 부호를 뒤집으면 끝까지 들어갔다가 나오면서 훑는 동선이 된다.
+    같은 방으로 한정하므로 건물을 가로지르는 낭비는 생기지 않는다.
+
+    cap_m 으로 상한을 둔다. 안 두면 방이 클수록 보너스가 무한정 커져서
+    '가장 먼 곳' 하나만 계속 이기고 왕복이 는다.
+    """
+    if not in_room or coef <= 0.0:
+        return 0.0
+    return coef * min(dist_m, cap_m)
+
+
 def sweep_decision(fr_cells, unseen, unseen_budget, done_frontier_cells,
                    goals_done, min_goals, free_area, min_area,
                    victims, expected):
@@ -477,6 +502,17 @@ class PatrolNavigator(Node):
         # 다른 방으로 넘어가질 못했다. 보너스면 훨씬 좋은 바깥 후보가
         # 여전히 이긴다.
         self.declare_parameter('room_bonus', 0.0)
+        # 같은 방 안에서 먼 후보를 먼저 가게 하는 계수[m^2 per m]. 0 이면 꺼짐.
+        #
+        # room_bonus 와 노리는 것이 다르다. room_bonus 는 '방을 덜 뜨게' 하는데,
+        # 실측(12런)에서 이탈 횟수는 확실히 줄었지만(27~35 대 36~44, 겹침 없음)
+        # 정작 주머니 침투 깊이도 완주율도 안 움직였다. 이탈 횟수는 성공 런과
+        # 실패 런을 안 가른다 — 성공 런도 런당 40회씩 방을 뜬다.
+        #
+        # 가르는 것은 '방 안쪽 끝까지 들어갔나' 하나였다. 그래서 이 값은
+        # 이탈이 아니라 깊이를 직접 겨냥한다.
+        self.declare_parameter('room_far_coef', 0.0)
+        self.declare_parameter('room_far_cap', 12.0)   # 보너스 상한 거리[m]
         # 실제로 '남은 양' 이 이 이하일 때만 완료로 인정한다
         self.declare_parameter('done_frontier_cells', 40)     # 미탐사 경계 셀
         self.declare_parameter('done_unseen_area', 8.0)       # 미관측 자유공간 m^2
@@ -552,6 +588,8 @@ class PatrolNavigator(Node):
         self.room_erode_m        = float(self.get_parameter('room_erode_m').value)
         self.room_leave_min_area = float(self.get_parameter('room_leave_min_area').value)
         self.room_bonus          = float(self.get_parameter('room_bonus').value)
+        self.room_far_coef       = float(self.get_parameter('room_far_coef').value)
+        self.room_far_cap        = float(self.get_parameter('room_far_cap').value)
         self._room_leaves        = 0      # 덜 보고 나간 횟수
         self._room_left_area     = 0.0    # 그때 남긴 미관측 합계 m^2
         self._t_start            = None   # 첫 계측 시각(경과 시간 기준점)
@@ -1608,9 +1646,13 @@ class PatrolNavigator(Node):
                                self.frontier_view_r, self.goal_dist_penalty)
             # 지금 있는 방 안이면 보너스. 판정은 프론티어 중심이 아니라
             # 실제로 갈 지점(goal)으로 한다 — 로봇이 가는 곳이 그쪽이다.
-            if room_info is not None and self.room_bonus > 0.0:
+            if room_info is not None and (self.room_bonus > 0.0
+                                          or self.room_far_coef > 0.0):
                 if self._in_room(room_info, goal[0], goal[1]):
                     score += self.room_bonus
+                    # 같은 방이면 먼 쪽을 먼저 — 안쪽 끝까지 들어갔다 나온다
+                    score += far_first_bonus(True, d, self.room_far_coef,
+                                             self.room_far_cap)
             if score > best_score:
                 best_score, best, best_kind = score, (goal, (fx, fy)), kind
         return best, best_score, best_kind

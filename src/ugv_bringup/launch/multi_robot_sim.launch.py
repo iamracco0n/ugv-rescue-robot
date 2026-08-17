@@ -195,6 +195,10 @@ def generate_launch_description():
     # 꼼꼼해진다. 남서 방 바닥에 누운 조난자(lying_s2)가 유일하게 5m 밖에서
     # 안 잡히고, 유효 50런에서 못 찾은 9런이 사실상 전부 이 한 명이었다.
     CAM_RANGE = float(os.environ.get('UGV_CAM_RANGE', '4.5'))
+    # 같은 방 안에서 먼 후보를 먼저 가게 하는 계수. 0 이면 꺼짐(기존 동작).
+    # 방 안쪽 끝까지 들어갔다 나오게 만들어, 구석에 누운 조난자를 남기지
+    # 않는 것이 목적이다.
+    FAR_COEF = float(os.environ.get('UGV_FAR_COEF', '0.0'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
@@ -418,6 +422,7 @@ def generate_launch_description():
                               'room_bonus': ROOM_BONUS,
                               'cam_see_min': CAM_MIN,
                               'cam_see_range': CAM_RANGE,
+                              'room_far_coef': FAR_COEF,
                               'explore_bounds': bounds_for(i, len(robots)),
                               # 건물 전체 — 내 구역을 끝내면 여기까지 넓혀
                               # 동료를 돕는다. 안 주면 자기 몫만 하고 논다.
