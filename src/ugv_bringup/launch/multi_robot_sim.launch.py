@@ -199,6 +199,12 @@ def generate_launch_description():
     # 방 안쪽 끝까지 들어갔다 나오게 만들어, 구석에 누운 조난자를 남기지
     # 않는 것이 목적이다.
     FAR_COEF = float(os.environ.get('UGV_FAR_COEF', '0.0'))
+    # 방에 눌러앉는 기준[m^2]. 0 이면 꺼짐(기존 동작).
+    # 이 방에 사람이 숨을 만한 미관측이 이만큼 남아 있으면 방 밖 후보를
+    # 후보에서 아예 뺀다. 점수 보너스(room_bonus)로는 바깥의 더 큰 덩어리에
+    # 계속 져서 방을 떴다.
+    COMMIT_AREA = float(os.environ.get('UGV_COMMIT_AREA', '0.0'))
+    COMMIT_MAX = float(os.environ.get('UGV_COMMIT_MAX', '240.0'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
     robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
@@ -423,6 +429,8 @@ def generate_launch_description():
                               'cam_see_min': CAM_MIN,
                               'cam_see_range': CAM_RANGE,
                               'room_far_coef': FAR_COEF,
+                              'room_commit_area': COMMIT_AREA,
+                              'room_commit_max_s': COMMIT_MAX,
                               'explore_bounds': bounds_for(i, len(robots)),
                               # 건물 전체 — 내 구역을 끝내면 여기까지 넓혀
                               # 동료를 돕는다. 안 주면 자기 몫만 하고 논다.

@@ -248,6 +248,45 @@ def far_first_bonus(in_room, dist_m, coef, cap_m):
     return coef * min(dist_m, cap_m)
 
 
+def room_commit_decision(unseen_area, threshold, committed_s, max_s):
+    """지금 있는 방에 '눌러앉을' 것인지 정하는 순수 함수.
+
+    왜 보너스가 아니라 커밋인가
+    ---------------------------
+    앞서 room_bonus(같은 방 후보에 점수를 얹어 주기)를 두 값으로 시험했다.
+    1.5 는 점수 단위(m^2)에 비해 너무 작아 아무 일도 안 일어났고, 50 은
+    방 이탈 횟수를 확실히 줄였지만(27~35 대 36~44, 12런에서 겹침 없음)
+    주머니 깊이도 완주율도 안 움직였다.
+
+    보너스는 경쟁이지 커밋이 아니기 때문이다. 바깥에 더 큰 덩어리가 있으면
+    여전히 진다. 실제로 탐욕적 프론티어 선택이 벽·구석·좁은 구조를 놓치는
+    것은 알려진 결함이고, 해법으로 제시되는 것은 점수 조정이 아니라
+    '커버리지 경로를 만들어 그 계획을 끝까지 수행' 하는 쪽이다.
+
+    안전장치가 둘 필요하다
+    ----------------------
+    예전에 '반경 5m 안을 먼저 처리' 라는 하드 필터를 썼다가 정반대 고장이
+    났다 — 비교 대상을 눈앞으로 제한하니 점수식이 무력화돼 방 하나를
+    1.4~4.3m 잔걸음으로 갉아먹으며 나가질 못했다.
+
+    이번 것은 '반경' 이 아니라 '방' 기준이라 방 안에서는 정상 점수식이 그대로
+    돌고 큰 덩어리부터 훑는다. 그래도 한 방에 영영 갇히는 것은 막아야 하므로
+    체류 시간 상한을 둔다. 남은 미관측이 자투리면 애초에 안 눌러앉는다.
+
+      unseen_area  이 방에 남은 '사람이 숨을 만한' 미관측 넓이[m^2]
+      threshold    이보다 커야 눌러앉는다. 0 이면 기능이 꺼진다
+      committed_s  이 방에 눌러앉은 시간[s]
+      max_s        이 시간을 넘기면 놓아 준다(한 방에 갇히는 것 방지)
+    """
+    if threshold <= 0.0:
+        return False
+    if unseen_area < threshold:
+        return False
+    if max_s > 0.0 and committed_s >= max_s:
+        return False
+    return True
+
+
 def sweep_decision(fr_cells, unseen, unseen_budget, done_frontier_cells,
                    goals_done, min_goals, free_area, min_area,
                    victims, expected):
@@ -511,6 +550,14 @@ class PatrolNavigator(Node):
         #
         # 가르는 것은 '방 안쪽 끝까지 들어갔나' 하나였다. 그래서 이 값은
         # 이탈이 아니라 깊이를 직접 겨냥한다.
+        # 방에 눌러앉는 기준[m^2]. 0 이면 꺼짐.
+        #
+        # 이 방에 '사람이 숨을 만한' 미관측이 이보다 많이 남아 있으면, 그
+        # 방 밖 후보는 아예 후보에서 뺀다. 보너스가 아니라 커밋이다 —
+        # room_bonus 로는 바깥의 더 큰 덩어리에 계속 져서 방을 떴다.
+        self.declare_parameter('room_commit_area', 0.0)
+        # 한 방에 눌러앉을 수 있는 최대 시간[s]. 갇히는 것을 막는다.
+        self.declare_parameter('room_commit_max_s', 240.0)
         self.declare_parameter('room_far_coef', 0.0)
         self.declare_parameter('room_far_cap', 12.0)   # 보너스 상한 거리[m]
         # 실제로 '남은 양' 이 이 이하일 때만 완료로 인정한다
@@ -588,6 +635,13 @@ class PatrolNavigator(Node):
         self.room_erode_m        = float(self.get_parameter('room_erode_m').value)
         self.room_leave_min_area = float(self.get_parameter('room_leave_min_area').value)
         self.room_bonus          = float(self.get_parameter('room_bonus').value)
+        self.room_commit_area    = float(
+            self.get_parameter('room_commit_area').value)
+        self.room_commit_max_s   = float(
+            self.get_parameter('room_commit_max_s').value)
+        self._commit_room        = None   # 눌러앉은 방의 중심(월드)
+        self._commit_since       = None   # 눌러앉기 시작한 시각
+        self._commit_logged      = False  # 같은 방 로그 도배 방지
         self.room_far_coef       = float(self.get_parameter('room_far_coef').value)
         self.room_far_cap        = float(self.get_parameter('room_far_cap').value)
         self._room_leaves        = 0      # 덜 보고 나간 횟수
@@ -1465,8 +1519,12 @@ class PatrolNavigator(Node):
 
         # 지금 있는 방을 한 번만 계산해 점수 보너스와 이탈 계측이 같이 쓴다.
         room_info = None
-        if self.room_bonus > 0.0 or self.room_leave_log:
+        if (self.room_bonus > 0.0 or self.room_leave_log
+                or self.room_far_coef > 0.0 or self.room_commit_area > 0.0):
             room_info = self._current_room(rx, ry)
+
+        # 이 방에 눌러앉을 것인가. 판정 규칙은 순수 함수로 떼어 테스트한다.
+        commit = self._update_commit(room_info)
 
         # 내 구역에서 먼저 고르고, 없으면 건물 전체로 넓혀 동료를 돕는다.
         tries = [self.explore_bounds]
@@ -1474,7 +1532,12 @@ class PatrolNavigator(Node):
             tries.append(self.world_bounds)
         for bounds in tries:
             best, best_score, best_kind = self._score_cands(
-                cands, rx, ry, bounds, room_info)
+                cands, rx, ry, bounds, room_info, restrict=commit)
+            if best is None and commit:
+                # 방 안에 갈 만한 후보가 없으면 커밋이 로봇을 세운다.
+                # 계획보다 임무가 먼저다 — 제한을 풀고 다시 고른다.
+                best, best_score, best_kind = self._score_cands(
+                    cands, rx, ry, bounds, room_info, restrict=False)
             if best is not None:
                 helping = bounds is not self.explore_bounds
                 if helping != self._helping:
@@ -1536,6 +1599,60 @@ class PatrolNavigator(Node):
         if not (0 <= ix < W and 0 <= iy < H):
             return False
         return bool(room[iy, ix])
+
+    def _room_unseen_area(self, info):
+        """이 방에 남은 '사람이 숨을 만한' 미관측 넓이[m^2].
+
+        자투리는 빼고 센다. 방 이탈 계측과 같은 기준을 쓴다 — 기준이 다르면
+        '이탈했다' 와 '눌러앉아야 한다' 가 서로 어긋난다.
+        """
+        seen_ok = self._seen_enough()
+        if info is None or seen_ok is None:
+            return 0.0
+        room, _ox, _oy, res, _W, _H = info
+        if seen_ok.shape != room.shape:
+            return 0.0
+        min_cells = max(1, int(round(self.room_leave_min_area / (res * res))))
+        left = actionable_cells(room & ~seen_ok, min_cells)
+        return float(max(left, 0)) * res * res
+
+    def _update_commit(self, info):
+        """지금 방에 눌러앉을지 갱신하고 결과를 돌려준다.
+
+        방이 바뀌면 체류 시계를 다시 잡는다. 안 그러면 앞 방에서 쓴 시간이
+        다음 방의 상한을 깎아 먹는다.
+        """
+        if self.room_commit_area <= 0.0 or info is None:
+            self._commit_room = None
+            self._commit_since = None
+            return False
+        room, ox, oy, res, _W, _H = info
+        ys, xs = np.nonzero(room)
+        if len(xs) == 0:
+            self._commit_room = None
+            self._commit_since = None
+            return False
+        cx = ox + (float(xs.mean()) + 0.5) * res
+        cy = oy + (float(ys.mean()) + 0.5) * res
+
+        now = self._now()
+        if (self._commit_room is None
+                or math.hypot(cx - self._commit_room[0],
+                              cy - self._commit_room[1]) > 3.0):
+            self._commit_room = (cx, cy)
+            self._commit_since = now
+
+        held = now - (self._commit_since or now)
+        area = self._room_unseen_area(info)
+        commit = room_commit_decision(area, self.room_commit_area,
+                                      held, self.room_commit_max_s)
+        if commit and not self._commit_logged:
+            self._commit_logged = True
+            self.get_logger().info(
+                f'[방 커밋] 미관측 {area:.1f}m² — 다 볼 때까지 이 방에 머문다')
+        elif not commit:
+            self._commit_logged = False
+        return commit
 
     def _check_room_leave(self, gx, gy, rx, ry, info):
         """방에 사람이 숨을 만한 미관측을 남기고 나가는지 센다(측정 전용).
@@ -1599,7 +1716,8 @@ class PatrolNavigator(Node):
             f'— 누적 {self._room_leaves}회 / {self._room_left_area:.1f}m² '
             f'/ 재진입 {self._room_reentries}회')
 
-    def _score_cands(self, cands, rx, ry, bounds, room_info=None):
+    def _score_cands(self, cands, rx, ry, bounds, room_info=None,
+                     restrict=False):
         """주어진 범위 안에서 가장 좋은 후보를 고른다.
 
         room_info 가 있고 room_bonus 가 0 보다 크면, 지금 있는 방 안의
@@ -1646,6 +1764,11 @@ class PatrolNavigator(Node):
                                self.frontier_view_r, self.goal_dist_penalty)
             # 지금 있는 방 안이면 보너스. 판정은 프론티어 중심이 아니라
             # 실제로 갈 지점(goal)으로 한다 — 로봇이 가는 곳이 그쪽이다.
+            # 눌러앉는 중이면 방 밖 후보는 아예 뺀다. 점수를 얹는 것과
+            # 다르다 — 바깥의 더 큰 덩어리가 이기는 일 자체를 없앤다.
+            if restrict and room_info is not None:
+                if not self._in_room(room_info, goal[0], goal[1]):
+                    continue
             if room_info is not None and (self.room_bonus > 0.0
                                           or self.room_far_coef > 0.0):
                 if self._in_room(room_info, goal[0], goal[1]):
