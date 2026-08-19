@@ -50,7 +50,128 @@ IDLE, PATROL, MANUAL, FIRE_ALARM = 'IDLE', 'PATROL', 'MANUAL', 'FIRE_ALARM'
 INSPECT = 'INSPECT'      # 조난자 후보 확인 — 정지 후 포탑 조준
 ESCAPE  = 'ESCAPE'       # 장애물 안에 박힘 — 후진으로 탈출
 
-def stuck_decision(ref, rx, ry, ryaw, now, eps_m, eps_rad, confirm_s):
+# 비트 수 표 — 방향 마스크가 0~15 라 표 조회가 가장 빠르다
+_POPCOUNT = np.array([bin(i).count('1') for i in range(16)], dtype=np.uint8)
+
+
+def dir_bit(angle):
+    """관측 방향을 4구획 비트로 바꾼다. 동=1, 북=2, 서=4, 남=8.
+
+    한 번 본 칸을 '봤음' 으로만 표시하면, 한 방향에서 스쳐 본 구석도 다시
+    안 간다. 가려진 조난자(다른 물체 뒤, 특정 각도에서만 보이는)를 못 찾는
+    원인으로 보인다 — 실측으로 2대도 6런 중 3런만 7/7 을 냈고, 미달성 런도
+    대부분 6명까지는 찾았다.
+
+    방향을 쌓아 두면 '어느 쪽에서만 봤다' 를 구분할 수 있다. 반대편에서 다시
+    보면 가림이 풀린다. 4구획이면 90도씩이라 앞뒤가 확실히 갈린다.
+
+    numpy 불리언이 이미 1바이트라 uint8 비트마스크로 바꿔도 메모리는 같다.
+    """
+    # -45~45 를 동쪽으로 묶기 위해 45도 밀어서 나눈다
+    q = int(math.floor((angle + math.pi / 4) / (math.pi / 2))) % 4
+    return 1 << q
+
+
+def segment_room(free, ry, rx, erode_cells):
+    """로봇이 지금 있는 '방' 을 자유공간에서 떼어낸다.
+
+    free        : bool 배열 (자유공간 True)
+    ry, rx      : 로봇 셀 좌표
+    erode_cells : 침식 반경(셀). **문 폭의 절반보다 커야** 문이 끊긴다.
+
+    반경 고정으로는 안 되는 이유: '주변에 안 본 곳이 없으면 나간다' 의
+    '주변' 을 5m 로 두면, 방이 그보다 크면 5m 안만 치우고 나가버린다.
+    방 크기는 방마다 다르므로 지도에서 직접 알아내야 한다.
+
+    거리변환을 쓴다. binary_erosion 을 반복하면 4-연결 구조라 마름모꼴로
+    깎이고 반복 횟수만큼 느리다. distance_transform_edt 는 한 번에 정확한
+    원형 침식을 준다.
+
+    되돌릴 때 팽창을 쓰면 안 된다 — 문틈으로 새어 옆방을 침범한다
+    (실측: 왼방 코어를 20셀 팽창하니 오른방을 6셀 침범, 140셀 오염).
+    대신 모든 자유공간 셀을 '가장 가까운 속살' 에 귀속시킨다. 이 방식은
+    문 한가운데서 자연스럽게 갈려 새지 않는다.
+    """
+    if free is None or not free[ry, rx]:
+        return None
+    dist = ndimage.distance_transform_edt(free)
+    core = dist > erode_cells
+    lbl, n = ndimage.label(core, structure=np.ones((3, 3), bool))
+    if n == 0:
+        return None
+    idx = ndimage.distance_transform_edt(
+        lbl == 0, return_distances=False, return_indices=True)
+    owner = lbl[idx[0], idx[1]]
+    my = owner[ry, rx]
+    if my == 0:
+        return None
+    return (owner == my) & free
+
+
+def actionable_cells(mask, min_cluster):
+    """계획기가 실제로 목표로 삼을 수 있는 셀 수만 센다.
+
+    미관측 격자와 미탐사 경계 둘 다에 쓴다. 두 곳 모두 계획기는 일정 크기
+    이상의 군집만 후보로 잡는데, 완료 판정이 자투리까지 세면 로봇이 절대
+    지울 수 없는 양이 남아 수색이 영원히 안 끝난다.
+
+    계획기는 min_cluster 셀 이상인 군집만 후보로 잡는다. 그런데 완료 판정이
+    자투리까지 전부 세면, 로봇이 절대 지울 수 없는 면적이 남아 수색이
+    영원히 안 끝난다.
+
+    실측(큰 월드, 조난자 7/7 을 다 찾은 뒤):
+        미관측 군집 5794개, 총 206.0 m^2
+          계획기가 갈 수 있음(>=40셀)     61개  174.0 m^2
+          너무 작아 목표가 못 됨(<40셀) 5733개   32.0 m^2
+
+    저 32 m^2 가 완료 판정을 영원히 막는다. 두 기준은 반드시 같아야 한다.
+    """
+    if not mask.any():
+        return 0
+    lbl, k = ndimage.label(mask, structure=np.ones((3, 3), bool))
+    if k == 0:
+        return 0
+    sizes = np.bincount(lbl.ravel())[1:]
+    return int(sizes[sizes >= min_cluster].sum())
+
+
+def claimed_by_peer(gx, gy, peer_goals, radius):
+    """다른 로봇이 이미 그 근처를 목표로 잡았는가.
+
+    지도를 공유해도 목표를 안 나누면 둘이 같은 구역으로 간다(실측: 두 대가
+    (-0.4,12.1) 과 (0.1,11.9) 를 각각 잡았다). 그러면 대수를 늘린 값어치가
+    없다.
+
+    peer_goals 는 {로봇이름: (x, y)}. 목표가 없는 로봇은 안 들어온다.
+    """
+    for (px, py) in peer_goals.values():
+        if math.hypot(gx - px, gy - py) < radius:
+            return True
+    return False
+
+
+def count_unique_victims(entries, merge_r):
+    """여러 로봇의 조난자 등록을 합쳐 실제 인원수를 센다.
+
+    entries 는 (로봇, 등록번호, x, y) 목록. 로봇마다 번호가 0 부터 시작하므로
+    번호로는 같은 사람인지 알 수 없다. 위치로 묶는다.
+
+    같은 사람을 둘로 세면 실종자 수가 채워진 것처럼 보여 수색이 조기
+    종료된다 — 1대에서 겪은 중복 등록 사고와 같은 종류다. 그래서 애매하면
+    묶는 쪽(덜 세는 쪽)이 안전하다. 덜 세면 더 찾으러 다닐 뿐이다.
+    """
+    clusters: list[tuple[float, float]] = []
+    for (_, _, x, y) in entries:
+        for (cx, cy) in clusters:
+            if math.hypot(x - cx, y - cy) < merge_r:
+                break
+        else:
+            clusters.append((x, y))
+    return len(clusters)
+
+
+def stuck_decision(ref, rx, ry, ryaw, now, eps_m, eps_rad, confirm_s,
+                   commanded=True):
     """진전이 있었는지 보고 박힘을 판정한다.
 
     반환: (박힘인가, 새 기준 또는 None)
@@ -68,6 +189,12 @@ def stuck_decision(ref, rx, ry, ryaw, now, eps_m, eps_rad, confirm_s):
     dyaw = abs(math.atan2(math.sin(ryaw - syaw), math.cos(ryaw - syaw)))
     if math.hypot(rx - sx, ry - sy) > eps_m or dyaw > eps_rad:
         return False, (rx, ry, ryaw, now)      # 진전 있음 → 기준 갱신
+    # Nav2 가 애초에 속도를 안 주고 있으면 박힌 게 아니라 일부러 선 것이다.
+    # Nav2 는 경로가 막히면 wait/spin/backup 으로 스스로 복구하는데, 그때
+    # 후진 탈출을 걸면 복구를 깨뜨리고 다시 복구가 돌아 무한 반복이 된다.
+    # 실측(2대): 박힘 82건, Nav2 복구 wait/spin/backup 각 65/65/64회.
+    if not commanded:
+        return False, (rx, ry, ryaw, now)      # 기준을 미뤄 누적을 막는다
     if now - st > confirm_s:
         return True, None
     return False, None
@@ -94,6 +221,70 @@ def goal_score(kind, n_cells, dist_m, res, view_r, lam):
     gain = (n_cells * res * res if kind == 'visual'
             else n_cells * res * view_r)
     return gain - lam * dist_m
+
+
+def far_first_bonus(in_room, dist_m, coef, cap_m):
+    """같은 방 안에서는 '먼 후보' 를 먼저 가도록 얹는 점수[m^2].
+
+    왜 부호를 뒤집나
+    ----------------
+    기본 점수식은 거리에 페널티를 준다(-lam*d). 그래서 방에 들어가면 입구
+    쪽부터 야금야금 훑고, 안쪽이 조금 남은 상태에서 바깥의 더 큰 덩어리에
+    져서 방을 뜬다. 남은 안쪽은 나중에 순서가 돌아와야 처리된다.
+
+    실측으로 이게 조난자 한 명을 좌우했다. 방2 는 남쪽 다섯 방 중 유일하게
+    내부 칸막이가 있어 문이 주머니 구석에 붙어 있고, 15m 안쪽 끝에 누운
+    조난자가 있다. 그 주머니 y<-11 까지 내려간 런은 조난자를 찾았고
+    (34런 중 33런), 못 내려간 런은 한 번도 못 찾았다(6런 중 0런).
+
+    방 안에서만 부호를 뒤집으면 끝까지 들어갔다가 나오면서 훑는 동선이 된다.
+    같은 방으로 한정하므로 건물을 가로지르는 낭비는 생기지 않는다.
+
+    cap_m 으로 상한을 둔다. 안 두면 방이 클수록 보너스가 무한정 커져서
+    '가장 먼 곳' 하나만 계속 이기고 왕복이 는다.
+    """
+    if not in_room or coef <= 0.0:
+        return 0.0
+    return coef * min(dist_m, cap_m)
+
+
+def room_commit_decision(unseen_area, threshold, committed_s, max_s):
+    """지금 있는 방에 '눌러앉을' 것인지 정하는 순수 함수.
+
+    왜 보너스가 아니라 커밋인가
+    ---------------------------
+    앞서 room_bonus(같은 방 후보에 점수를 얹어 주기)를 두 값으로 시험했다.
+    1.5 는 점수 단위(m^2)에 비해 너무 작아 아무 일도 안 일어났고, 50 은
+    방 이탈 횟수를 확실히 줄였지만(27~35 대 36~44, 12런에서 겹침 없음)
+    주머니 깊이도 완주율도 안 움직였다.
+
+    보너스는 경쟁이지 커밋이 아니기 때문이다. 바깥에 더 큰 덩어리가 있으면
+    여전히 진다. 실제로 탐욕적 프론티어 선택이 벽·구석·좁은 구조를 놓치는
+    것은 알려진 결함이고, 해법으로 제시되는 것은 점수 조정이 아니라
+    '커버리지 경로를 만들어 그 계획을 끝까지 수행' 하는 쪽이다.
+
+    안전장치가 둘 필요하다
+    ----------------------
+    예전에 '반경 5m 안을 먼저 처리' 라는 하드 필터를 썼다가 정반대 고장이
+    났다 — 비교 대상을 눈앞으로 제한하니 점수식이 무력화돼 방 하나를
+    1.4~4.3m 잔걸음으로 갉아먹으며 나가질 못했다.
+
+    이번 것은 '반경' 이 아니라 '방' 기준이라 방 안에서는 정상 점수식이 그대로
+    돌고 큰 덩어리부터 훑는다. 그래도 한 방에 영영 갇히는 것은 막아야 하므로
+    체류 시간 상한을 둔다. 남은 미관측이 자투리면 애초에 안 눌러앉는다.
+
+      unseen_area  이 방에 남은 '사람이 숨을 만한' 미관측 넓이[m^2]
+      threshold    이보다 커야 눌러앉는다. 0 이면 기능이 꺼진다
+      committed_s  이 방에 눌러앉은 시간[s]
+      max_s        이 시간을 넘기면 놓아 준다(한 방에 갇히는 것 방지)
+    """
+    if threshold <= 0.0:
+        return False
+    if unseen_area < threshold:
+        return False
+    if max_s > 0.0 and committed_s >= max_s:
+        return False
+    return True
 
 
 def sweep_decision(fr_cells, unseen, unseen_budget, done_frontier_cells,
@@ -133,6 +324,12 @@ class PatrolNavigator(Node):
 
         # ── 파라미터 ─────────────────────────────────────────────────
         # 순찰 웨이포인트: 메인홀 → RoomA → RoomB → RoomD → RoomC → (반복)
+        # 로봇이 둘이면 프레임이 ugv1/map, ugv2/map 으로 갈린다.
+        # 기본값은 1대 구성과 같다.
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.map_frame  = self.get_parameter('map_frame').value
+        self.base_frame = self.get_parameter('base_frame').value
         self.declare_parameter('waypoints_x', [0.0, -9.0,  9.0,  9.0, -9.0])
         self.declare_parameter('waypoints_y', [0.0,  7.0,  7.0, -7.0, -7.0])
         self.declare_parameter('reach_dist', 0.6)
@@ -168,6 +365,33 @@ class PatrolNavigator(Node):
         # 목표 점수에서 거리 1m 에 매기는 벌점(m^2). '1m 더 가는 값어치를
         # 몇 m^2 로 보는가'. 로봇이 훑으며 지나가는 폭이 약 1.4m 이므로
         # 그보다 작게 잡아야 먼 미관측 구역으로 나간다.
+        # ── 팀 공유(로봇 여러 대) ──────────────────────────────
+        # peers 가 비면 1대 구성과 완전히 같다.
+        self.declare_parameter('peers', [''])
+        # 거짓이면 동료가 있어도 공유를 안 한다. 3단계 효과를 A/B 로 재기
+        # 위한 스위치다 — 켠 것과 끈 것을 비교해야 도움이 되는지 알 수 있다.
+        self.declare_parameter('team_share', True)
+        # 상대 목표에서 이 반경 안의 후보는 고르지 않는다(m).
+        self.declare_parameter('peer_claim_radius', 6.0)
+        # 두 로봇의 등록을 같은 사람으로 볼 거리(m).
+        # 실측으로 두 로봇이 같은 사람을 1.5m 넘게 벌어져 등록해 8/7 이
+        # 나왔다. 관측 거리에 따라 오차가 커지므로 조금 넉넉히 잡는다.
+        # 덜 세는 쪽이 안전하다 — 더 찾으러 다닐 뿐이다.
+        self.declare_parameter('victim_merge_r', 2.2)
+        # 탐사 목표를 이 사각형 안으로 제한한다 [xmin, ymin, xmax, ymax].
+        # 비우면 제한 없음.
+        #
+        # ★ 이 로봇은 collision 이 없다(URDF 주석 참조 — 기구학 구동이라
+        #   충돌체가 오히려 로봇을 튕겨낸다). 그래서 코스트맵에 벽이 안 찍힌
+        #   틈이 있으면 벽을 그냥 통과한다. 실측으로 로봇이 x=-34~-36 에서
+        #   관측됐는데 큰 월드 외벽은 x=+-28 이다. 건물 밖으로 나간 것이다.
+        #   밖에는 볼 것도 없고 지도도 안 생겨 시간만 버린다.
+        self.declare_parameter('explore_bounds', [0.0, 0.0, 0.0, 0.0])
+        # 건물 전체 범위. 내 구역을 다 훑으면 여기까지 넓혀 동료를 돕는다.
+        # 구역을 하드 필터로만 쓰면 자기 몫을 끝낸 로봇이 그냥 논다.
+        # 조난자가 구역마다 고르게 있을 리 없으므로(실측: 중간 월드 서1/동2),
+        # 그러면 늦은 쪽이 전체 시간을 정해 2대를 쓴 값어치가 사라진다.
+        self.declare_parameter('world_bounds', [0.0, 0.0, 0.0, 0.0])
         self.declare_parameter('goal_dist_penalty', 0.5)
         # 라이다 경계를 넘었을 때 새로 보이는 깊이(m). 경계 '길이' 를
         # 넓이로 환산할 때 쓴다.
@@ -181,6 +405,8 @@ class PatrolNavigator(Node):
         # 로봇이 180도 도는 동안 '안 움직인다' 고 오판해 후진 탈출이 돌고,
         # 앞뒤로 왕복만 하게 된다.
         self.declare_parameter('stuck_turn_eps',  0.30)     # 이 이상 돌면 정상(rad)
+        # Nav2 명령 속도가 이보다 작으면 '가라고 안 한 것' 으로 본다.
+        self.declare_parameter('stuck_cmd_eps',   0.02)
         self.declare_parameter('escape_speed',    0.35)     # 후진 속도(m/s)
         self.declare_parameter('escape_max_s',    5.0)      # 후진 최대 시간(s)
         self.declare_parameter('escape_min_move', 0.8)      # 이만큼 물러나면 탈출 성공(m)
@@ -209,6 +435,34 @@ class PatrolNavigator(Node):
         # 방이 생기고, 조난자를 지나친다. 카메라가 실제로 훑은 격자를 따로
         # 관리해서, 라이다 프론티어가 없어도 안 본 구역으로 계속 들어간다.
         self.declare_parameter('cam_see_range', 4.5)        # 유효 관측 거리(m)
+        # 이 거리보다 가까운 바닥은 '봤음' 으로 치지 않는다.
+        #
+        # 카메라 높이 0.5m, 수직 FOV 48.9도라 수평 조준이면 화면 아래끝이
+        # 바닥과 만나는 지점이 1.1m 다. 그보다 가까운 바닥은 아예 안 찍힌다.
+        # 누운 사람 검출은 실측으로 2.3m 부터 됐다(2.3m 보다 가까운 성공
+        # 0건 / 32건 중).
+        #
+        # 그런데 지금까지 0.3m 부터 칠하고 있었다. 로봇이 지나가면서 주변
+        # 띠를 '봤음' 으로 칠하는데 실제로는 그 바닥을 한 번도 못 본 것이다.
+        # 누운 사람이 거기 있으면 영원히 못 찾는다 — 이미 봤다고 표시돼
+        # 다시 안 가기 때문이다.
+        #
+        # 판정이 센서가 못 하는 것을 세면 안 된다. 미탐사 경계·미관측 조각
+        # 에서 여섯 번 겪은 것과 같은 종류의 어긋남이다.
+        #
+        # 기본값 0.3(기존 동작). 2.0 과 비교해 봤지만 **효과가 없어서가
+        # 아니라 잴 수 없어서** 그대로 둔다. 포탑을 11.5도 내린 뒤로 누운
+        # 조난자를 이미 거의 다 찾아서 더 올릴 여지가 없었다.
+        #
+        #   큰 월드 2머신 18런(조건당 9런)
+        #   누운 3명   2.0m: 22/27   0.3m: 21/27
+        #   7/7 달성   4/9 vs 5/9    유령  0건 vs 1건
+        #
+        # 버그 자체는 실재한다 — 카메라가 못 보는 띠를 '봤음' 으로 칠하면
+        # 거기 누운 사람은 영원히 못 찾는다. 검출이 천장에 닿지 않은 조건
+        # (더 어두운 월드, 더 작은 대상, 더 빠른 주행)에서는 다시 볼 값어치가
+        # 있다. '재봤는데 효과 없었다' 와 '잴 수 없었다' 는 다르다.
+        self.declare_parameter('cam_see_min', 0.3)
         self.declare_parameter('cam_fov_rad',   1.089)      # 카메라 수평 FOV
         # 미관측 군집 최소 크기. 카메라 FOV 스윕은 사방에 자잘한 미관측
         # 조각을 항상 남긴다. 작게 잡으면 '주변 미관측' 이 영영 비지 않아
@@ -219,6 +473,40 @@ class PatrolNavigator(Node):
         # 목표로 삼아야 한다. 이 값이 크면 계획기가 못 잡는 조각이 남아
         # 완료 판정이 영원히 안 선다.
         self.declare_parameter('visual_min_local', 40)      # 셀 수(0.1m^2)
+        # 몇 방향에서 봐야 '제대로 봤다' 로 칠지. 1 이면 이 기능이 꺼진다.
+        # 2 로 두면 한 방향에서만 스쳐 본 칸을 다시 훑는다 — 가려진 조난자를
+        # 찾기 위한 것이다. 대신 수색이 길어진다.
+        #
+        # 기본값 2(켬). 처음엔 이득이 없어 껐다가 다시 켰다.
+        #
+        # 처음 쟀을 때는 검출이 병목이었다 — 포탑이 수평이라 누운 조난자를
+        # 52% 밖에 못 찾았고, 탐사를 아무리 잘해도 그 벽에 막혀 차이가
+        # 안 났다. 포탑을 고친 뒤 다시 재니 값이 드러났다.
+        #
+        #   메인 15런, 지표는 '7/7 까지 걸린 시간'(발견 인원은 이미 만점)
+        #   base  7/7 2/4   1780, 954
+        #   dirs  7/7 4/4   874, 1046, 762, 1105    <- 채택
+        #   room  7/7 2/3   1267, 1036
+        #   both  7/7 3/4   1115, 829, 1098
+        #
+        # room_bonus 를 같이 켠 both 가 dirs 단독보다 낮다 — 방 우선
+        # 보너스는 보태는 것이 없다. 그쪽은 끈 채로 둔다.
+        #
+        # 아래는 처음 껐을 때의 근거다.
+        #   base 5.14  dirs 5.86  (조건당 14런, t≈1.3 → 구분 안 됨)
+        # 평균만 보면 앞서지만 머신별로 순위가 뒤집혔다 — 메인에서는 꼴찌
+        # (4.8), OMEN 에서는 1위(6.5)였다. 진짜 효과라면 한 머신에서 최고면서
+        # 다른 머신에서 최저일 수 없다. 노이즈를 본 것이다.
+        # 기능은 남겨 둔다. 가려진 조난자가 실제 문제로 확인되면 켜면 된다.
+        self.declare_parameter('seen_min_dirs', 2)
+        # 내 구역 밖이라도 이 거리 안이면 간다(0 이면 구역이 하드 경계).
+        #
+        # 구역을 하드 경계로 두면 코앞의 미탐사도 상대 것이면 안 간다.
+        # 도움은 '내 구역을 완전히 비운 뒤' 에야 발동하는데, 그때는 건물을
+        # 가로질러야 해서 이동 비용이 이득을 먹는다(실측: 중간 월드에서
+        # 12번 넘어간 런이 가장 느렸다 — 866초).
+        # 가까우면 경계를 조금 넘도록 두는 편이 자연스럽다.
+        self.declare_parameter('cross_border_dist', 6.0)
         # 사각지대(벽 모서리·장애물 뒤)는 여유가 안 나오므로 낮게 잡는다
         self.declare_parameter('visual_clearance', 0.45)
         # 목표 도착 후 그 자리에서 포탑이 훑을 시간(초). 바로 다음 목표로
@@ -227,6 +515,51 @@ class PatrolNavigator(Node):
         # '수색 완료' 를 인정하기 위한 최소 근거 (기동 직후 오보 방지)
         self.declare_parameter('min_goals_for_sweep', 8)      # 도달한 목표 수
         self.declare_parameter('min_area_for_sweep', 200.0)   # 매핑된 자유공간 m^2
+        # ── 방을 덜 보고 나가는지 측정 (동작은 안 바꾼다) ──────────────
+        # 방에 사람이 숨을 만한 미관측이 남았는데 다른 방으로 넘어가면 센다.
+        # 벽 뒤 조난자를 놓치는 경로가 이것이라는 관찰이 있었는데, 실제로
+        # 몇 번 일어나는지 숫자가 없었다. 고치기 전에 먼저 잰다.
+        self.declare_parameter('room_leave_log', True)
+        # 침식 반경. **문 폭의 절반보다 커야** 문이 끊겨 방이 갈린다.
+        # 이 월드의 문은 1.8m 라 0.9m 초과가 필요하다 — 작게 잡으면 문이
+        # 안 끊겨 건물 전체가 한 방으로 나오고, 이탈이 한 번도 안 잡힌다.
+        # (tools/test_room_segment.py 가 1.8m 문 / 1.0m 반경으로 확인한다)
+        self.declare_parameter('room_erode_m', 1.0)
+        # 이보다 작은 미관측은 자투리로 보고 넘어간다. 누운 사람이 약 0.9m^2
+        # 라 그보다 조금 작게 잡아 사람이 숨을 수 있는 크기만 센다.
+        self.declare_parameter('room_leave_min_area', 0.8)
+        # 지금 있는 방 안의 후보에 얹어 주는 점수(m^2). 0 이면 이 기능이 꺼진다.
+        #
+        # 실측(큰 월드 2대, 4런): 수색 후반에만 방을 덜 보고 나가는 일이
+        # 런당 19.3회, 덜 보고 나왔던 방으로 되돌아오는 왕복이 14.3회였다.
+        # 왕복은 한 번에 끝냈으면 안 했을 이동이라 순수 낭비다.
+        #
+        # '보너스' 이지 '필터' 가 아닌 것이 핵심이다. 예전에 '반경 5m 안을
+        # 먼저 처리' 라는 하드 필터를 썼다가 정반대 고장이 났다 — 점수식은
+        # 이미 큰 덩어리를 선호하는데 필터가 비교 대상을 눈앞으로 제한해
+        # 점수식을 무력화했고, 방 하나를 1.4~4.3m 잔걸음으로 갉아먹으며
+        # 다른 방으로 넘어가질 못했다. 보너스면 훨씬 좋은 바깥 후보가
+        # 여전히 이긴다.
+        self.declare_parameter('room_bonus', 0.0)
+        # 같은 방 안에서 먼 후보를 먼저 가게 하는 계수[m^2 per m]. 0 이면 꺼짐.
+        #
+        # room_bonus 와 노리는 것이 다르다. room_bonus 는 '방을 덜 뜨게' 하는데,
+        # 실측(12런)에서 이탈 횟수는 확실히 줄었지만(27~35 대 36~44, 겹침 없음)
+        # 정작 주머니 침투 깊이도 완주율도 안 움직였다. 이탈 횟수는 성공 런과
+        # 실패 런을 안 가른다 — 성공 런도 런당 40회씩 방을 뜬다.
+        #
+        # 가르는 것은 '방 안쪽 끝까지 들어갔나' 하나였다. 그래서 이 값은
+        # 이탈이 아니라 깊이를 직접 겨냥한다.
+        # 방에 눌러앉는 기준[m^2]. 0 이면 꺼짐.
+        #
+        # 이 방에 '사람이 숨을 만한' 미관측이 이보다 많이 남아 있으면, 그
+        # 방 밖 후보는 아예 후보에서 뺀다. 보너스가 아니라 커밋이다 —
+        # room_bonus 로는 바깥의 더 큰 덩어리에 계속 져서 방을 떴다.
+        self.declare_parameter('room_commit_area', 0.0)
+        # 한 방에 눌러앉을 수 있는 최대 시간[s]. 갇히는 것을 막는다.
+        self.declare_parameter('room_commit_max_s', 240.0)
+        self.declare_parameter('room_far_coef', 0.0)
+        self.declare_parameter('room_far_cap', 12.0)   # 보너스 상한 거리[m]
         # 실제로 '남은 양' 이 이 이하일 때만 완료로 인정한다
         self.declare_parameter('done_frontier_cells', 40)     # 미탐사 경계 셀
         self.declare_parameter('done_unseen_area', 8.0)       # 미관측 자유공간 m^2
@@ -262,6 +595,17 @@ class PatrolNavigator(Node):
         self.explore_speed     = float(self.get_parameter('explore_assumed_speed').value)
         self.explore_tmo_max   = float(self.get_parameter('explore_goal_timeout_max').value)
         self.far_goal_min_dist = float(self.get_parameter('far_goal_min_dist').value)
+        self.peers = [x for x in self.get_parameter('peers').value if x]
+        if not self.get_parameter('team_share').value:
+            self.peers = []
+        self.peer_claim_r = float(self.get_parameter('peer_claim_radius').value)
+        self.victim_merge_r = float(self.get_parameter('victim_merge_r').value)
+        b = list(self.get_parameter('explore_bounds').value)
+        # 넷이 다 0 이면 제한 없음으로 본다.
+        self.explore_bounds = b if len(b) == 4 and any(b) else None
+        wb = list(self.get_parameter('world_bounds').value)
+        self.world_bounds = wb if len(wb) == 4 and any(wb) else None
+        self._helping = False          # 내 구역을 끝내고 동료를 돕는 중인가
         self.goal_dist_penalty = float(self.get_parameter('goal_dist_penalty').value)
         self.frontier_view_r   = float(self.get_parameter('frontier_view_r').value)
         self.approach_ring_n   = int(self.get_parameter('approach_ring_n').value)
@@ -269,19 +613,45 @@ class PatrolNavigator(Node):
         self.stuck_confirm_s   = float(self.get_parameter('stuck_confirm_s').value)
         self.stuck_move_eps    = float(self.get_parameter('stuck_move_eps').value)
         self.stuck_turn_eps    = float(self.get_parameter('stuck_turn_eps').value)
+        self.stuck_cmd_eps     = float(self.get_parameter('stuck_cmd_eps').value)
         self.escape_speed      = float(self.get_parameter('escape_speed').value)
         self.escape_max_s      = float(self.get_parameter('escape_max_s').value)
         self.escape_min_move   = float(self.get_parameter('escape_min_move').value)
         self.escape_cooldown   = float(self.get_parameter('escape_cooldown_s').value)
         self.escape_max_streak = int(self.get_parameter('escape_max_streak').value)
         self.cam_range         = float(self.get_parameter('cam_see_range').value)
+        self.cam_min           = float(self.get_parameter('cam_see_min').value)
         self.cam_fov           = float(self.get_parameter('cam_fov_rad').value)
         self.visual_min        = int(self.get_parameter('visual_min_size').value)
         self.visual_min_local  = int(self.get_parameter('visual_min_local').value)
+        self.seen_min_dirs     = int(self.get_parameter('seen_min_dirs').value)
+        self.cross_border_r    = float(
+            self.get_parameter('cross_border_dist').value)
         self.visual_clearance  = float(self.get_parameter('visual_clearance').value)
         self.dwell_s           = float(self.get_parameter('arrive_dwell_s').value)
         self.min_goals_for_sweep = int(self.get_parameter('min_goals_for_sweep').value)
         self.min_area_for_sweep  = float(self.get_parameter('min_area_for_sweep').value)
+        self.room_leave_log      = bool(self.get_parameter('room_leave_log').value)
+        self.room_erode_m        = float(self.get_parameter('room_erode_m').value)
+        self.room_leave_min_area = float(self.get_parameter('room_leave_min_area').value)
+        self.room_bonus          = float(self.get_parameter('room_bonus').value)
+        self.room_commit_area    = float(
+            self.get_parameter('room_commit_area').value)
+        self.room_commit_max_s   = float(
+            self.get_parameter('room_commit_max_s').value)
+        self._commit_room        = None   # 눌러앉은 방의 중심(월드)
+        self._commit_since       = None   # 눌러앉기 시작한 시각
+        self._commit_logged      = False  # 같은 방 로그 도배 방지
+        self.room_far_coef       = float(self.get_parameter('room_far_coef').value)
+        self.room_far_cap        = float(self.get_parameter('room_far_cap').value)
+        self._room_leaves        = 0      # 덜 보고 나간 횟수
+        self._room_left_area     = 0.0    # 그때 남긴 미관측 합계 m^2
+        self._t_start            = None   # 첫 계측 시각(경과 시간 기준점)
+        # 덜 보고 나온 방들의 중심. 다시 들어오면 왕복한 것이다.
+        # 왕복이야말로 진짜 낭비다 — 한 번에 안 끝내서 오가는 것이므로.
+        self._left_rooms         = []     # [(cx, cy, 재진입횟수)]
+        self._room_reentries     = 0
+        self._cur_room           = None   # 직전에 있던 방 중심(바뀜 감지용)
         self.done_frontier_cells = int(self.get_parameter('done_frontier_cells').value)
         self.done_unseen_area    = float(self.get_parameter('done_unseen_area').value)
         self.done_unseen_frac    = float(self.get_parameter('done_unseen_frac').value)
@@ -319,12 +689,15 @@ class PatrolNavigator(Node):
         self._visited_frontiers: list[tuple] = []
         self._explore_done = False
         self._sweeps = 0                      # 건물 전체를 훑은 횟수
-        self._victims: dict[int, tuple] = {}  # 확정 조난자 {pid: (x, y, label)}
+        # 확정 조난자 {(로봇, 등록번호): (x, y, label)}.
+        # 로봇마다 번호가 0 부터라 로봇 이름까지 키에 넣어야 안 겹친다.
+        self._victims: dict[tuple, tuple] = {}
+        self._peer_goals: dict[str, tuple] = {}   # 다른 로봇이 향하는 목표
         self._all_found_reported = False      # '전원 발견' 보고를 이미 냈는지
         self._fires_seen: list[tuple] = []    # 확정 화재 [(x, y)]
 
         # 시야 커버리지 — SLAM 맵과 같은 격자에 정렬해서 유지한다
-        self._seen = None                     # bool 배열 (h, w)
+        self._seen = None                     # uint8 방향 비트마스크 (h, w)
         self._seen_geom = None                # (w, h, res, ox, oy) — 바뀌면 재정렬
         self._turret_yaw = 0.0
 
@@ -348,38 +721,67 @@ class PatrolNavigator(Node):
         self._tf_listener = tf2_ros.TransformListener(self._tf_buf, self)
 
         # ── 구독 ─────────────────────────────────────────────────────
-        self.create_subscription(Odometry,     '/odom',        self.odom_cb,   10)
-        self.create_subscription(OccupancyGrid, '/map',        self.map_cb,    1)
-        self.create_subscription(PoseStamped,   '/goal_pose',  self.goal_echo_cb, 10)
-        self.create_subscription(PointStamped,  '/fire_alert', self.fire_cb,   10)
-        self.create_subscription(Bool,          '/patrol_enable', self.enable_cb, 10)
+        self.create_subscription(Odometry,     'odom',        self.odom_cb,   10)
+        self.create_subscription(OccupancyGrid, 'map',        self.map_cb,    1)
+        self.create_subscription(PoseStamped,   'goal_pose',  self.goal_echo_cb, 10)
+        self.create_subscription(PointStamped,  'fire_alert', self.fire_cb,   10)
+        self.create_subscription(Bool,          'patrol_enable', self.enable_cb, 10)
         # 조난자 확인 핸드셰이크 (target_manager_node)
-        self.create_subscription(PointStamped, '/inspect_request', self.inspect_req_cb,  10)
-        self.create_subscription(Bool,         '/inspect_done',    self.inspect_done_cb, 10)
+        self.create_subscription(PointStamped, 'inspect_request', self.inspect_req_cb,  10)
+        self.create_subscription(Bool,         'inspect_done',    self.inspect_done_cb, 10)
         # 열원 확인 핸드셰이크 (fire_detection_node) — 조난자와 같은 흐름,
         # 다만 불에는 너무 가까이 붙지 않도록 standoff 를 따로 둔다
-        self.create_subscription(PointStamped, '/fire_candidate',    self.fire_cand_cb, 10)
+        self.create_subscription(PointStamped, 'fire_candidate',    self.fire_cand_cb, 10)
         # 카메라가 어디를 보는지 알아야 시야 커버리지를 칠할 수 있다
-        self.create_subscription(JointState, '/joint_states', self.joint_cb, 10)
+        self.create_subscription(JointState, 'joint_states', self.joint_cb, 10)
         # 수색 결과 요약 보고용 — 확정된 조난자·화재 목록
-        self.create_subscription(MarkerArray,  '/patient_markers', self.victims_cb, 10)
-        self.create_subscription(PointStamped, '/fire_alert',      self.fire_seen_cb, 10)
-        self.create_subscription(Bool,         '/fire_inspect_done', self.inspect_done_cb, 10)
+        self.create_subscription(MarkerArray,  'patient_markers', self.victims_cb, 10)
+        self.create_subscription(PointStamped, 'fire_alert',      self.fire_seen_cb, 10)
+        self.create_subscription(Bool,         'fire_inspect_done', self.inspect_done_cb, 10)
 
         # ── 발행 ─────────────────────────────────────────────────────
-        self.goal_pub   = self.create_publisher(PoseStamped, '/goal_pose',      10)
-        self.aim_pub    = self.create_publisher(Point,       '/apex_aim_point', 10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/patrol_markers', 10)
+        self.goal_pub   = self.create_publisher(PoseStamped, 'goal_pose',      10)
+        self.aim_pub    = self.create_publisher(Point,       'apex_aim_point', 10)
+        self.marker_pub = self.create_publisher(MarkerArray, 'patrol_markers', 10)
         # 장애물 탈출용 — 로봇이 장애물 안에 들어가면 Nav2 는 시작 자세가
         # 무효라 경로를 못 낸다. 그때만 직접 후진 명령을 낸다.
-        self.cmd_pub    = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_pub    = self.create_publisher(Twist, 'cmd_vel', 10)
+        # Nav2 가 지금 실제로 '가라' 고 하는지 본다. 안 가라고 하는 동안
+        # 안 움직이는 건 박힌 게 아니라 일부러 선 것이다(복구 동작 중).
+        self._cmd_mag = 0.0
+        self.create_subscription(Twist, 'cmd_vel', self._cmd_watch, 10)
         # 한 바퀴 수색 완료 신호
-        self.sweep_pub  = self.create_publisher(Bool, '/sweep_complete', 10)
+        self.sweep_pub  = self.create_publisher(Bool, 'sweep_complete', 10)
         # 카메라로 실제 훑은 구역 / 아직 못 본 구역을 눈으로 구분하기 위한 격자.
         # SLAM 맵은 '라이다가 지나갔나' 만 보여주므로, 방을 통과만 하고 구석을
         # 안 본 경우가 지도상으로는 멀쩡해 보인다. 로그의 '미관측 279m²' 가
         # 어디를 말하는지 화면에서 볼 수 없었다.
-        self.cover_pub  = self.create_publisher(OccupancyGrid, '/coverage_map', 1)
+        self.cover_pub  = self.create_publisher(OccupancyGrid, 'coverage_map', 1)
+
+        # ── 팀 공유 ────────────────────────────────────────────────
+        # 내 목표와 내 관측 격자를 내보내고, 상대 것을 받는다.
+        # peers 가 비면(1대 구성) 아무 것도 안 붙는다.
+        self.claim_pub = self.create_publisher(PoseStamped, 'explore_claim', 1)
+        # 관측 격자는 coverage_map 과 다르다 — 저쪽은 벽과 관측완료가 둘 다
+        # -1 이라 '봤다' 를 되읽을 수 없다. 여기선 0/1 로만 낸다.
+        self.seen_pub = self.create_publisher(OccupancyGrid, 'seen_grid', 1)
+        for peer in self.peers:
+            self.create_subscription(
+                PoseStamped, f'/{peer}/explore_claim',
+                lambda m, p=peer: self.peer_goal_cb(m, p), 1)
+            self.create_subscription(
+                OccupancyGrid, f'/{peer}/seen_grid',
+                lambda m, p=peer: self.peer_seen_cb(m, p), 1)
+            self.create_subscription(
+                MarkerArray, f'/{peer}/patient_markers',
+                lambda m, p=peer: self.victims_cb(m, p), 10)
+            # 화재도 합친다. fire_seen_cb 가 이미 2m 안이면 같은 불로 묶으므로
+            # 받기만 하면 중복이 안 생긴다. 안 받으면 두 로봇이 같은 불을
+            # 각각 세어 정답(4건)보다 많이 보고한다(실측 6/4).
+            self.create_subscription(
+                PointStamped, f'/{peer}/fire_alert', self.fire_seen_cb, 10)
+        if self.peers:
+            self.get_logger().info(f'팀 수색 — 동료 {", ".join(self.peers)}')
 
         self.create_timer(0.5, self.tick)     # 2 Hz FSM
         # 탈출 명령은 20Hz 로 낸다. Nav2 컨트롤러도 /cmd_vel 에 20Hz 로 0을
@@ -387,6 +789,8 @@ class PatrolNavigator(Node):
         self.create_timer(0.05, self._escape_cmd_tick)
         # 커버리지 격자는 크고 자주 안 바뀌므로 저주기로만 발행
         self.create_timer(2.0, self._publish_coverage)
+        if self.peers:
+            self.create_timer(2.0, self._publish_seen)
 
         if self.patrol_mode == 'explore':
             self.get_logger().info(
@@ -488,7 +892,8 @@ class PatrolNavigator(Node):
                 g.info.origin.position.x, g.info.origin.position.y)
         if self._seen_geom == geom:
             return
-        new = np.zeros((g.info.height, g.info.width), dtype=bool)
+        # 방향 비트마스크(동1 북2 서4 남8). 불리언과 같은 1바이트다.
+        new = np.zeros((g.info.height, g.info.width), dtype=np.uint8)
         if self._seen is not None and self._seen_geom is not None:
             ow, oh, _ores, oox, ooy = self._seen_geom
             # 기존 커버리지를 새 격자 좌표로 옮긴다 (해상도는 동일 전제)
@@ -514,11 +919,16 @@ class PatrolNavigator(Node):
 
         cam = self._robot_yaw_map() + self._turret_yaw
         half = self.cam_fov / 2.0
+        # 광선이 향하는 쪽이 아니라, 그 칸에서 로봇을 바라보는 쪽을 적는다.
+        # '어느 방향에서 이 칸을 봤나' 가 가림을 판단하는 기준이기 때문이다.
         n_rays = 21
         step = res * 0.9
         for i in range(n_rays):
             a = cam - half + i * self.cam_fov / (n_rays - 1)
             ca, sa = math.cos(a), math.sin(a)
+            # 가까운 바닥은 카메라에 안 잡히므로 칠하지 않는다.
+            # 다만 벽 판정은 로봇 바로 앞부터 해야 한다 — 안 그러면
+            # 바로 앞 벽을 건너뛰고 그 너머를 봤다고 칠한다.
             d = 0.3
             while d <= self.cam_range:
                 ix = int((rx + d * ca - ox) / res)
@@ -527,8 +937,20 @@ class PatrolNavigator(Node):
                     break
                 if occ[iy, ix]:
                     break                      # 벽 뒤는 못 본다
-                self._seen[iy, ix] = True
+                if d < self.cam_min:
+                    d += step
+                    continue                   # 너무 가까워 화면에 안 들어옴
+                self._seen[iy, ix] |= dir_bit(a + math.pi)
                 d += step
+
+    def _seen_enough(self):
+        """충분히 본 칸의 불리언 격자. 방향 수가 기준 이상인 칸만 참."""
+        if self._seen is None:
+            return None
+        if self.seen_min_dirs <= 1:
+            return self._seen > 0
+        # 켜진 비트 수를 센다 (0~15 이므로 표를 쓰는 게 빠르다)
+        return _POPCOUNT[self._seen] >= self.seen_min_dirs
 
     def _coverage_left(self):
         """아직 남은 수색량을 (미탐사 경계 셀 수, 미관측 자유공간 m^2) 로 반환.
@@ -552,12 +974,97 @@ class PatrolNavigator(Node):
         nb[:, 1:] |= unknown[:, :-1]
         nb[:-1, :] |= unknown[1:, :]
         nb[1:, :] |= unknown[:-1, :]
-        frontier_cells = int((free & nb).sum())
-        if self._seen is None or self._seen.shape != free.shape:
+        frontier = free & nb
+        # 탐사 범위 밖의 경계는 세지 않는다. 목표로 삼는 걸 막아 놓고
+        # 완료 판정에서는 세면 영원히 완료가 안 선다 — 자투리 미관측 때와
+        # 똑같은 어긋남이다(실측: 미탐사 경계 220셀이 기준 40 아래로 안 내려감).
+        if self._active_bounds() is not None:
+            x0, y0, x1, y1 = self._active_bounds()
+            ox = g.info.origin.position.x
+            oy = g.info.origin.position.y
+            xs = ox + (np.arange(W) + 0.5) * res
+            ys = oy + (np.arange(H) + 0.5) * res
+            inx = (xs >= x0) & (xs <= x1)
+            iny = (ys >= y0) & (ys <= y1)
+            frontier &= iny[:, None] & inx[None, :]
+        # 계획기가 목표로 삼을 수 있는 크기의 군집만 센다.
+        # _find_frontiers 는 frontier_min 셀 이상인 군집만 후보로 잡는데
+        # 완료 판정이 셀을 통째로 세면, 로봇이 절대 지울 수 없는 경계가
+        # 남아 수색이 영원히 안 끝난다. 자투리 미관측 때와 같은 어긋남이다
+        # (실측: 미니맵에서 경계 143셀이 기준 40 아래로 안 내려가고 오히려
+        #  131 -> 143 으로 늘었다).
+        # 크기 하한을 넘어도, 계획기가 접근점을 못 찾는 군집은 목표가 될 수
+        # 없다. 실측(미니맵): 남은 경계 14군집이 전부 x~+-8, y~+-5 로 벽에
+        # 붙은 띠였다. 라이다가 찍은 마지막 자유 줄과 벽 안쪽 미탐사가 맞닿는
+        # 자리라, 지우려면 벽 속으로 들어가야 해서 원리적으로 못 지운다.
+        # _pick_frontier 는 _pull_back 으로 이런 후보를 이미 걸러낸다.
+        # 판정도 같은 필터를 거쳐야 한다.
+        frontier_cells = 0
+        if frontier.any():
+            lbl, k = ndimage.label(frontier, structure=np.ones((3, 3), bool))
+            sizes = np.bincount(lbl.ravel())
+            big = [i for i in range(1, k + 1) if sizes[i] >= self.frontier_min]
+            if big:
+                rx, ry = self._robot_pose()
+                ox = g.info.origin.position.x
+                oy = g.info.origin.position.y
+                for c, i in zip(ndimage.center_of_mass(frontier, lbl, big), big):
+                    fx = ox + (c[1] + 0.5) * res
+                    fy = oy + (c[0] + 0.5) * res
+                    # 이미 가본 경계는 계획기가 다시 안 고른다(_pick_frontier
+                    # 의 1.5m 중복 판정). 가봤는데도 남아 있다면 지울 수 없는
+                    # 것이다 — 벽 안쪽 미탐사처럼. 판정도 같이 빼야 한다.
+                    # 실측: 접근가능 필터만으로는 벽 띠가 통과했다. 벽에서
+                    # 1m 떨어져 설 수는 있으니 _pull_back 이 성공한다.
+                    # '접근이 된다' 와 '지울 수 있다' 는 다르다.
+                    if any(math.hypot(fx - vx, fy - vy) < 1.5
+                           for vx, vy in self._visited_frontiers):
+                        continue
+                    if self._pull_back(fx, fy, rx, ry,
+                                       self.frontier_standoff,
+                                       self.goal_clearance) is not None:
+                        frontier_cells += int(sizes[i])
+        seen_ok = self._seen_enough()
+        if seen_ok is None or seen_ok.shape != free.shape:
             unseen_area = float(free.sum()) * res * res
         else:
-            unseen_area = float((free & ~self._seen).sum()) * res * res
+            # 계획기가 목표로 삼을 수 있는 크기의 군집만 센다.
+            # 자투리까지 세면 로봇이 절대 못 지우는 면적이 남아 수색이
+            # 영원히 안 끝난다(실측: 32 m^2 가 5733개 조각으로 흩어져 있었다).
+            # 이 하한은 _find_visual_frontiers 에 주는 값과 같아야 한다.
+            unseen_mask = free & ~seen_ok
+            # 미관측도 탐사 범위 안만 센다. 구역을 갈라 배정하면 상대
+            # 구역은 내가 절대 못 가는데, 그걸 세면 완료가 영원히 안 선다.
+            # 경계 셀에는 범위를 적용해 놓고 여기만 빠뜨렸다(실측: 구역분할
+            # 2대가 조난자를 다 찾고도 '미관측 135m² 남음' 에서 멈췄다).
+            if self._active_bounds() is not None:
+                bx0, by0, bx1, by1 = self._active_bounds()
+                ox = g.info.origin.position.x
+                oy = g.info.origin.position.y
+                xs_m = ox + (np.arange(W) + 0.5) * res
+                ys_m = oy + (np.arange(H) + 0.5) * res
+                inx = (xs_m >= bx0) & (xs_m <= bx1)
+                iny = (ys_m >= by0) & (ys_m <= by1)
+                unseen_mask = unseen_mask & (iny[:, None] & inx[None, :])
+            cells = actionable_cells(unseen_mask, self.visual_min_local)
+            unseen_area = float(cells) * res * res
         return (frontier_cells, unseen_area)
+
+    def _publish_seen(self):
+        """내가 눈으로 훑은 구역을 0/1 격자로 내보낸다(동료가 합칠 수 있게).
+
+        coverage_map 을 재활용하지 않는 이유: 거기선 벽과 관측완료가 둘 다
+        -1 이라 되읽으면 '봤다' 와 '벽' 을 구분할 수 없다.
+        """
+        g = self._map_msg
+        if g is None or self._seen is None:
+            return
+        m = OccupancyGrid()
+        m.header.frame_id = self.map_frame
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.info = g.info
+        m.data = self._seen.astype(np.int8).reshape(-1).tolist()  # 0~15
+        self.seen_pub.publish(m)
 
     def _publish_coverage(self):
         """수색 커버리지를 /coverage_map 으로 발행 (RViz Map 디스플레이용).
@@ -580,12 +1087,13 @@ class PatrolNavigator(Node):
         unknown = arr < 0
         out = np.full((H, W), -1, dtype=np.int8)
         out[unknown] = 100                       # 가본 적 없음 = 짙은 안개
-        if self._seen is not None and self._seen.shape == free.shape:
-            out[free & ~self._seen] = 55         # 지나갔지만 눈으로 못 봄
+        seen_ok = self._seen_enough()
+        if seen_ok is not None and seen_ok.shape == free.shape:
+            out[free & ~seen_ok] = 55         # 지나갔지만 눈으로 못 봄
         else:
             out[free] = 55
         m = OccupancyGrid()
-        m.header.frame_id = 'map'
+        m.header.frame_id = self.map_frame
         m.header.stamp = self.get_clock().now().to_msg()
         m.info = g.info
         m.data = out.reshape(-1).tolist()
@@ -622,7 +1130,10 @@ class PatrolNavigator(Node):
         res = g.info.resolution
         ox, oy = g.info.origin.position.x, g.info.origin.position.y
         arr = np.asarray(g.data, dtype=np.int16).reshape(H, W)
-        target = (arr >= 0) & (arr < 25) & (~self._seen)
+        seen_ok = self._seen_enough()
+        if seen_ok is None or seen_ok.shape != arr.shape:
+            return []
+        target = (arr >= 0) & (arr < 25) & (~seen_ok)
         if not target.any():
             return []
         lbl, n = ndimage.label(target, structure=np.ones((3, 3), dtype=bool))
@@ -637,18 +1148,48 @@ class PatrolNavigator(Node):
         return [(ox + (c[1] + 0.5) * res, oy + (c[0] + 0.5) * res, int(sizes[i]))
                 for c, i in zip(cents, idx)]
 
-    def victims_cb(self, msg: MarkerArray):
-        """target_manager 가 발행하는 환자 마커에서 확정 목록을 뽑는다."""
+    def victims_cb(self, msg: MarkerArray, src: str = 'self'):
+        """환자 마커에서 확정 목록을 뽑는다.
+
+        src 로 어느 로봇이 등록했는지 구분한다. 로봇마다 등록번호가 0 부터
+        시작하므로 번호만으로는 같은 사람인지 알 수 없다. 인원수는 위치로
+        묶어서 센다(count_unique_victims).
+        """
         for m in msg.markers:
             if m.ns != 'patient_text' or m.action != Marker.ADD:
                 continue
             pid = m.id // 3
-            self._victims[pid] = (m.pose.position.x, m.pose.position.y,
-                                  m.text.split('\n')[0] if m.text else '')
+            self._victims[(src, pid)] = (
+                m.pose.position.x, m.pose.position.y,
+                m.text.split('\n')[0] if m.text else '')
         # 실종자 수를 채운 순간 바로 보고한다(커버리지를 기다리지 않는다)
-        if (self.expected_victims > 0
-                and len(self._victims) >= self.expected_victims):
+        if self.expected_victims > 0 and self._victim_count() >= self.expected_victims:
             self._report_all_found()
+
+    def _victim_count(self) -> int:
+        """팀 전체가 찾은 실제 인원수. 같은 사람을 둘이 등록했으면 하나로 센다."""
+        return count_unique_victims(
+            [(k[0], k[1], v[0], v[1]) for k, v in self._victims.items()],
+            self.victim_merge_r)
+
+    def peer_goal_cb(self, msg: PoseStamped, peer: str):
+        """다른 로봇이 지금 향하는 목표. 같은 구역으로 겹쳐 가지 않기 위함."""
+        self._peer_goals[peer] = (msg.pose.position.x, msg.pose.position.y)
+
+    def peer_seen_cb(self, msg: OccupancyGrid, peer: str):
+        """다른 로봇이 눈으로 훑은 구역. 내 관측 기록에 합친다.
+
+        한 로봇이 이미 들여다본 방을 다른 로봇이 다시 갈 이유가 없다.
+        두 로봇이 같은 병합 지도(/map)를 쓰므로 격자 모양이 같아 그대로
+        겹칠 수 있다. 모양이 다르면(지도가 막 커진 직후) 건너뛴다.
+        """
+        if self._seen is None:
+            return
+        H, W = self._seen.shape
+        if msg.info.height != H or msg.info.width != W:
+            return
+        a = np.asarray(msg.data, dtype=np.uint8).reshape(H, W)
+        self._seen |= a          # 방향 비트까지 합쳐진다
 
     def fire_seen_cb(self, msg: PointStamped):
         fx, fy = msg.point.x, msg.point.y
@@ -713,7 +1254,7 @@ class PatrolNavigator(Node):
 
     def _robot_pose(self):
         try:
-            tf = self._tf_buf.lookup_transform('map', 'base_footprint', Time())
+            tf = self._tf_buf.lookup_transform(self.map_frame, self.base_frame, Time())
             t = tf.transform.translation
             return t.x, t.y
         except Exception:
@@ -728,7 +1269,7 @@ class PatrolNavigator(Node):
         """
         try:
             q = self._tf_buf.lookup_transform(
-                'map', 'base_footprint', Time()).transform.rotation
+                self.map_frame, self.base_frame, Time()).transform.rotation
             return _yaw_from_quat(q)
         except Exception:
             return self.robot_theta
@@ -754,7 +1295,7 @@ class PatrolNavigator(Node):
             rx, ry = self._robot_pose()
             yaw = math.atan2(y - ry, x - rx)
         g = PoseStamped()
-        g.header.frame_id = 'map'
+        g.header.frame_id = self.map_frame
         g.header.stamp = self.get_clock().now().to_msg()
         g.pose.position.x = float(x)
         g.pose.position.y = float(y)
@@ -861,7 +1402,7 @@ class PatrolNavigator(Node):
         for _, (_, _, lbl) in vics:
             by_lvl[lbl] = by_lvl.get(lbl, 0) + 1
         _, unseen = self._coverage_left()
-        lines = [f'🏁 전원 발견! 조난자 {len(vics)}/{self.expected_victims}명 '
+        lines = [f'🏁 전원 발견! 조난자 {self._victim_count()}/{self.expected_victims}명 '
                  '확인 — 구조 대기',
                  '  ' + ' / '.join(f'{k} {v}명' for k, v in sorted(by_lvl.items())),
                  f'  화재 {len(self._fires_seen)}건']
@@ -882,7 +1423,7 @@ class PatrolNavigator(Node):
         vics = sorted(self._victims.items())
         fires = list(self._fires_seen)
         lines = [f'━━ 수색 {sweep_n}회차 완료 — 미탐사·미관측 구역 없음 ━━',
-                 f'  조난자 {len(vics)}명, 화재 {len(fires)}건']
+                 f'  조난자 {self._victim_count()}명, 화재 {len(fires)}건']
         for pid, (x, y, lbl) in vics:
             lines.append(f'   · #{pid} {lbl} ({x:.1f}, {y:.1f})')
         for i, (x, y) in enumerate(fires):
@@ -976,6 +1517,212 @@ class PatrolNavigator(Node):
                     for fx, fy, n in self._find_visual_frontiers(
                         self.visual_min_local)])
 
+        # 지금 있는 방을 한 번만 계산해 점수 보너스와 이탈 계측이 같이 쓴다.
+        room_info = None
+        if (self.room_bonus > 0.0 or self.room_leave_log
+                or self.room_far_coef > 0.0 or self.room_commit_area > 0.0):
+            room_info = self._current_room(rx, ry)
+
+        # 이 방에 눌러앉을 것인가. 판정 규칙은 순수 함수로 떼어 테스트한다.
+        commit = self._update_commit(room_info)
+
+        # 내 구역에서 먼저 고르고, 없으면 건물 전체로 넓혀 동료를 돕는다.
+        tries = [self.explore_bounds]
+        if self.world_bounds is not None and self.explore_bounds is not None:
+            tries.append(self.world_bounds)
+        for bounds in tries:
+            best, best_score, best_kind = self._score_cands(
+                cands, rx, ry, bounds, room_info, restrict=commit)
+            if best is None and commit:
+                # 방 안에 갈 만한 후보가 없으면 커밋이 로봇을 세운다.
+                # 계획보다 임무가 먼저다 — 제한을 풀고 다시 고른다.
+                best, best_score, best_kind = self._score_cands(
+                    cands, rx, ry, bounds, room_info, restrict=False)
+            if best is not None:
+                helping = bounds is not self.explore_bounds
+                if helping != self._helping:
+                    self._helping = helping
+                    self.get_logger().info(
+                        '내 구역을 다 훑었다 — 동료 구역으로 넘어가 돕는다'
+                        if helping else '내 구역으로 복귀')
+                break
+        self._last_goal_kind = ('미탐사 경계' if best_kind == 'frontier'
+                                else '미관측 구역')
+        if best is not None and self.room_leave_log:
+            # best 는 (goal, 프론티어중심) 이라 좌표는 best[0] 안에 있다.
+            # 계측이 수색을 죽이면 안 된다 — 실제로 여기서 낸 TypeError 로
+            # 순찰 노드가 죽어 3런이 목표 0회로 날아갔다. 재는 코드의
+            # 실패는 재는 것만 멈추고 임무는 계속돼야 한다.
+            try:
+                self._check_room_leave(best[0][0], best[0][1], rx, ry, room_info)
+            except Exception as e:                      # noqa: BLE001
+                if self.room_leave_log:
+                    self.room_leave_log = False
+                    self.get_logger().error(f'[방 이탈] 계측 중단 — {e!r}')
+        return best
+
+    def _current_room(self, rx, ry):
+        """로봇이 지금 있는 방 마스크와 좌표 변환 정보.
+
+        거리변환이 들어가 싸지 않으므로 목표를 고를 때 한 번만 계산해
+        점수 보너스와 이탈 계측이 함께 쓴다.
+
+        반환: (room, ox, oy, res, W, H) 또는 None
+        """
+        g = self._map_msg
+        if g is None:
+            return None
+        H, W = g.info.height, g.info.width
+        res = g.info.resolution
+        if res <= 0.0:
+            return None
+        ox = g.info.origin.position.x
+        oy = g.info.origin.position.y
+        ix = int((rx - ox) / res)
+        iy = int((ry - oy) / res)
+        if not (0 <= ix < W and 0 <= iy < H):
+            return None
+        arr = np.asarray(g.data, dtype=np.int16).reshape(H, W)
+        free = (arr >= 0) & (arr < 25)
+        er = max(1, int(round(self.room_erode_m / res)))
+        room = segment_room(free, iy, ix, er)
+        if room is None:
+            return None
+        return room, ox, oy, res, W, H
+
+    @staticmethod
+    def _in_room(info, x, y):
+        """월드 좌표가 그 방 안인지."""
+        room, ox, oy, res, W, H = info
+        ix = int((x - ox) / res)
+        iy = int((y - oy) / res)
+        if not (0 <= ix < W and 0 <= iy < H):
+            return False
+        return bool(room[iy, ix])
+
+    def _room_unseen_area(self, info):
+        """이 방에 남은 '사람이 숨을 만한' 미관측 넓이[m^2].
+
+        자투리는 빼고 센다. 방 이탈 계측과 같은 기준을 쓴다 — 기준이 다르면
+        '이탈했다' 와 '눌러앉아야 한다' 가 서로 어긋난다.
+        """
+        seen_ok = self._seen_enough()
+        if info is None or seen_ok is None:
+            return 0.0
+        room, _ox, _oy, res, _W, _H = info
+        if seen_ok.shape != room.shape:
+            return 0.0
+        min_cells = max(1, int(round(self.room_leave_min_area / (res * res))))
+        left = actionable_cells(room & ~seen_ok, min_cells)
+        return float(max(left, 0)) * res * res
+
+    def _update_commit(self, info):
+        """지금 방에 눌러앉을지 갱신하고 결과를 돌려준다.
+
+        방이 바뀌면 체류 시계를 다시 잡는다. 안 그러면 앞 방에서 쓴 시간이
+        다음 방의 상한을 깎아 먹는다.
+        """
+        if self.room_commit_area <= 0.0 or info is None:
+            self._commit_room = None
+            self._commit_since = None
+            return False
+        room, ox, oy, res, _W, _H = info
+        ys, xs = np.nonzero(room)
+        if len(xs) == 0:
+            self._commit_room = None
+            self._commit_since = None
+            return False
+        cx = ox + (float(xs.mean()) + 0.5) * res
+        cy = oy + (float(ys.mean()) + 0.5) * res
+
+        now = self._now()
+        if (self._commit_room is None
+                or math.hypot(cx - self._commit_room[0],
+                              cy - self._commit_room[1]) > 3.0):
+            self._commit_room = (cx, cy)
+            self._commit_since = now
+
+        held = now - (self._commit_since or now)
+        area = self._room_unseen_area(info)
+        commit = room_commit_decision(area, self.room_commit_area,
+                                      held, self.room_commit_max_s)
+        if commit and not self._commit_logged:
+            self._commit_logged = True
+            self.get_logger().info(
+                f'[방 커밋] 미관측 {area:.1f}m² — 다 볼 때까지 이 방에 머문다')
+        elif not commit:
+            self._commit_logged = False
+        return commit
+
+    def _check_room_leave(self, gx, gy, rx, ry, info):
+        """방에 사람이 숨을 만한 미관측을 남기고 나가는지 센다(측정 전용).
+
+        벽 뒤 조난자를 놓치는 경로가 이것이라는 관찰이 있었다. 다만 반대
+        방향 고장도 겪었다 — 예전에 '반경 5m 안을 먼저 처리' 로 두었더니
+        방 하나를 1.4~4.3m 잔걸음으로 갉아먹으며 나가질 못했다. 그래서
+        자투리(기본 0.8m^2 미만)는 세지 않는다. 사람이 숨을 수 있는 크기만
+        문제로 본다.
+
+        여기서는 세기만 하고 목표를 바꾸지 않는다. 고치기 전에 이 일이
+        실제로 몇 번 일어나는지부터 알아야 한다.
+        """
+        seen_ok = self._seen_enough()
+        if info is None or seen_ok is None:
+            return
+        room, ox, oy, res, W, H = info
+        if seen_ok.shape != room.shape:
+            return
+        if self._t_start is None:
+            self._t_start = self._now()
+        elapsed = self._now() - self._t_start
+
+        # 지금 있는 방의 중심(월드 좌표). 방을 알아보는 이름표로 쓴다.
+        ys, xs = np.nonzero(room)
+        cx = ox + (float(xs.mean()) + 0.5) * res
+        cy = oy + (float(ys.mean()) + 0.5) * res
+
+        # 방이 바뀌었나. 바뀌었고 그게 예전에 덜 보고 나온 방이면 왕복이다.
+        if self._cur_room is None or math.hypot(
+                cx - self._cur_room[0], cy - self._cur_room[1]) > 3.0:
+            self._cur_room = (cx, cy)
+            for i, (lx, ly, cnt) in enumerate(self._left_rooms):
+                if math.hypot(cx - lx, cy - ly) <= 3.0:
+                    self._left_rooms[i] = (lx, ly, cnt + 1)
+                    self._room_reentries += 1
+                    self.get_logger().warn(
+                        f'[방 재진입] {elapsed:.0f}s — 덜 보고 나왔던 방으로 '
+                        f'되돌아옴 (이 방 {cnt + 1}번째) / 누적 '
+                        f'{self._room_reentries}회')
+                    break
+
+        if self._in_room(info, gx, gy):
+            return          # 목표가 같은 방 안이면 나가는 게 아니다
+        min_cells = max(1, int(round(self.room_leave_min_area / (res * res))))
+        left = actionable_cells(room & ~seen_ok, min_cells)
+        if left <= 0:
+            return
+        area = float(left) * res * res
+        self._room_leaves += 1
+        self._room_left_area += area
+        if not any(math.hypot(cx - lx, cy - ly) <= 3.0
+                   for lx, ly, _ in self._left_rooms):
+            self._left_rooms.append((cx, cy, 0))
+        # 경과 시간을 같이 남긴다. 수색 초반에는 지도가 통째로 미관측이라
+        # 방에 들어가자마자 나와도 '크게 남기고 나감' 으로 잡힌다. 그때
+        # 나가는 건 오히려 정상이다 — 아직 못 가본 방이 널렸으니까.
+        # 초반과 후반을 갈라 봐야 무엇을 고칠지 정해진다.
+        self.get_logger().warn(
+            f'[방 이탈] {elapsed:.0f}s — 미관측 {area:.1f}m² 남기고 다른 방으로 '
+            f'— 누적 {self._room_leaves}회 / {self._room_left_area:.1f}m² '
+            f'/ 재진입 {self._room_reentries}회')
+
+    def _score_cands(self, cands, rx, ry, bounds, room_info=None,
+                     restrict=False):
+        """주어진 범위 안에서 가장 좋은 후보를 고른다.
+
+        room_info 가 있고 room_bonus 가 0 보다 크면, 지금 있는 방 안의
+        후보에 그만큼을 얹는다. 방을 덜 보고 나가는 것을 줄이기 위한 것이다.
+        """
         best, best_score, best_kind = None, -1e9, None
         for fx, fy, n, kind in cands:
             # 중복 판정은 반드시 '프론티어 중심' 기준. 당겨진 goal 로 비교하면
@@ -997,13 +1744,51 @@ class PatrolNavigator(Node):
             # 당긴 결과가 로봇 코앞이면 도착 판정이 즉시 서서 제자리걸음이 된다
             if math.hypot(goal[0] - rx, goal[1] - ry) < self.frontier_reach:
                 continue
+            # 동료가 이미 그쪽으로 가고 있으면 넘긴다. 지도를 공유해도 목표를
+            # 안 나누면 둘이 같은 구역으로 몰린다(실측: 두 대가 (-0.4,12.1)
+            # 과 (0.1,11.9) 를 각각 잡았다).
+            if claimed_by_peer(fx, fy, self._peer_goals, self.peer_claim_r):
+                continue
+            if bounds is not None:
+                x0, y0, x1, y1 = bounds
+                if not (x0 <= fx <= x1 and y0 <= fy <= y1):
+                    # 내 구역 밖이라도 코앞이면 간다. 경계 너머 3m 를
+                    # 남겨 두고 건물을 가로지르는 건 낭비다.
+                    if not (self.cross_border_r > 0
+                            and self.world_bounds is not None
+                            and d < self.cross_border_r
+                            and self.world_bounds[0] <= fx <= self.world_bounds[2]
+                            and self.world_bounds[1] <= fy <= self.world_bounds[3]):
+                        continue
             score = goal_score(kind, n, d, self._map_res(),
                                self.frontier_view_r, self.goal_dist_penalty)
+            # 지금 있는 방 안이면 보너스. 판정은 프론티어 중심이 아니라
+            # 실제로 갈 지점(goal)으로 한다 — 로봇이 가는 곳이 그쪽이다.
+            # 눌러앉는 중이면 방 밖 후보는 아예 뺀다. 점수를 얹는 것과
+            # 다르다 — 바깥의 더 큰 덩어리가 이기는 일 자체를 없앤다.
+            if restrict and room_info is not None:
+                if not self._in_room(room_info, goal[0], goal[1]):
+                    continue
+            if room_info is not None and (self.room_bonus > 0.0
+                                          or self.room_far_coef > 0.0):
+                if self._in_room(room_info, goal[0], goal[1]):
+                    score += self.room_bonus
+                    # 같은 방이면 먼 쪽을 먼저 — 안쪽 끝까지 들어갔다 나온다
+                    score += far_first_bonus(True, d, self.room_far_coef,
+                                             self.room_far_cap)
             if score > best_score:
                 best_score, best, best_kind = score, (goal, (fx, fy)), kind
-        self._last_goal_kind = ('미탐사 경계' if best_kind == 'frontier'
-                                else '미관측 구역')
-        return best
+        return best, best_score, best_kind
+
+    def _active_bounds(self):
+        """지금 실제로 훑는 범위. 동료를 돕는 중이면 건물 전체다.
+
+        완료 판정이 내 구역만 보면, 돕는 중에 상대 구역의 미탐사를 안 세서
+        '다 훑었다' 가 잘못 선다. 목표를 고르는 범위와 세는 범위는 같아야 한다.
+        """
+        if self._helping and self.world_bounds is not None:
+            return self.world_bounds
+        return self.explore_bounds
 
     def _map_res(self):
         """지도 해상도(m/셀). 지도가 아직 없으면 표준값."""
@@ -1046,6 +1831,10 @@ class PatrolNavigator(Node):
         t.linear.x = -abs(self.escape_speed)
         self.cmd_pub.publish(t)
 
+    def _cmd_watch(self, msg: Twist):
+        """Nav2 가 내는 속도 명령의 크기. 박힘 오판을 막는 데 쓴다."""
+        self._cmd_mag = abs(msg.linear.x) + abs(msg.angular.z) * 0.3
+
     def _update_stuck(self, rx, ry, now) -> bool:
         """순찰 중인데 실제로 안 움직이면 '박힘' 으로 본다.
 
@@ -1061,7 +1850,8 @@ class PatrolNavigator(Node):
             return False
         stuck, new_ref = stuck_decision(
             self._stuck_ref, rx, ry, ryaw, now,
-            self.stuck_move_eps, self.stuck_turn_eps, self.stuck_confirm_s)
+            self.stuck_move_eps, self.stuck_turn_eps, self.stuck_confirm_s,
+            commanded=self._cmd_mag > self.stuck_cmd_eps)
         if new_ref is not None:
             self._stuck_ref = new_ref
         return stuck
@@ -1306,7 +2096,7 @@ class PatrolNavigator(Node):
             self.get_logger().info(
                 f'{phase} — 미탐사 경계 {fr_cells}셀(완료 기준 '
                 f'{self.done_frontier_cells}), 미관측 {unseen:.1f}m²(기준 '
-                f'{unseen_budget:.1f}), 조난자 {len(self._victims)}'
+                f'{unseen_budget:.1f}), 조난자 {self._victim_count()}'
                 + (f'/{self.expected_victims}' if self.expected_victims > 0 else '')
                 + '명', throttle_duration_sec=60.0)
             # 판정 규칙은 순수 함수로 분리해 단위 테스트한다(sweep_decision).
@@ -1314,7 +2104,7 @@ class PatrolNavigator(Node):
                 fr_cells, unseen, unseen_budget, self.done_frontier_cells,
                 self._goals_done, self.min_goals_for_sweep,
                 self._known_free_area(), self.min_area_for_sweep,
-                len(self._victims), self.expected_victims)
+                self._victim_count(), self.expected_victims)
 
             if decision == 'done':
                 if not self._explore_done:
@@ -1330,7 +2120,7 @@ class PatrolNavigator(Node):
                 # 처음부터 다시 훑는다.
                 self._sweeps += 1
                 self.get_logger().warn(
-                    f'전 구역을 훑었으나 조난자 {len(self._victims)}/'
+                    f'전 구역을 훑었으나 조난자 {self._victim_count()}/'
                     f'{self.expected_victims}명만 확인됨 — 놓친 구역이 있다고 보고 '
                     f'{self._sweeps + 1}회차 재수색 시작(시야 기록 초기화)')
                 self._seen = None
@@ -1377,6 +2167,13 @@ class PatrolNavigator(Node):
         self._send_goal(nxt[0], nxt[1])
         self._wp_sent_t = now
         self._far_lock = True           # 도착/시간초과까지 이 목표를 붙든다
+        if self.peers:                  # 동료가 이쪽으로 안 오도록 알린다
+            c = PoseStamped()
+            c.header.frame_id = self.map_frame
+            c.header.stamp = self.get_clock().now().to_msg()
+            c.pose.position.x, c.pose.position.y = self._frontier_src
+            c.pose.orientation.w = 1.0
+            self.claim_pub.publish(c)
         # 먼 목표일수록 시간을 더 준다 (직선거리 기준, 경로는 더 길므로 넉넉히)
         gd = math.hypot(nxt[0] - rx, nxt[1] - ry)
         self._explore_budget = min(self.explore_tmo_max,
@@ -1435,7 +2232,7 @@ class PatrolNavigator(Node):
         stamp = self.get_clock().now().to_msg()
         # 순찰 경로 라인 — 웨이포인트 모드에서만 (탐사 모드는 경로가 미리 없음)
         line = Marker()
-        line.header.frame_id = 'map'
+        line.header.frame_id = self.map_frame
         line.header.stamp = stamp
         line.ns = 'patrol_route'
         line.id = 0
@@ -1464,7 +2261,7 @@ class PatrolNavigator(Node):
         if cur_goal is not None:
             wx, wy = cur_goal
             cur = Marker()
-            cur.header.frame_id = 'map'
+            cur.header.frame_id = self.map_frame
             cur.header.stamp = stamp
             cur.ns = 'patrol_target'
             cur.id = 1
@@ -1481,7 +2278,7 @@ class PatrolNavigator(Node):
 
         # 화재 경보 배너
         banner = Marker()
-        banner.header.frame_id = 'map'
+        banner.header.frame_id = self.map_frame
         banner.header.stamp = stamp
         banner.ns = 'alarm_banner'
         banner.id = 2

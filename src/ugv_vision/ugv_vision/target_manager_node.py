@@ -26,7 +26,29 @@ from visualization_msgs.msg import Marker, MarkerArray
 from ugv_msgs.msg import TargetDetection
 
 # ── 튜닝 파라미터 ──────────────────────────────────────────────────────
-SEARCH_AMP   = math.radians(50)  # 사인파 폴백 진폭
+# 사인파 폴백 스캔. 파라미터로 열어 두었다(search_amp_deg / search_omega).
+#
+# 진폭이 좁으면 옆으로 지나친 조난자를 영영 못 본다. 50도면 카메라 FOV
+# (+-31도)를 더해도 전방 162도만 훑는다.
+#
+# 각속도는 지금도 한 지점이 2.08초(약 27프레임) 화면에 머문다 — 검출에는
+# 충분해 보인다. 그래도 검출 창이 좁아서(누운 사람 2.1~4.9m) 스쳐 지나가는
+# 일이 있으므로 같이 쟀다.
+#
+# 결과: 둘 다 효과 없음. 기본값을 그대로 둔다.
+#   조건당 8런(무효 제외), 두 머신 합산
+#   base 50도/0.6    완주 6/8   누움 23/27   검출건수 30   유령 0
+#   wide 80도/0.6    완주 7/8   누움 24/27   검출건수 31   유령 0
+#   slow 50도/0.35   완주 6/8   누움 24/30   검출건수 30   유령 0
+#
+# wide 가 완주 1런 앞서지만 채택 기준에 못 미친다.
+#   · 머신 방향이 어긋난다 — 메인은 4/4 대 3/4 인데 오로라는 3/5 대 3/5 로
+#     완전히 같다
+#   · 메커니즘 증거가 없다. 각도를 넓혀 통했다면 검출 건수가 늘어야 하는데
+#     30 대 31 로 사실상 같다. 각도가 병목이 아니었다는 뜻이다
+#
+# 표본 3런 시점에는 wide 가 3/3 이었다. 8런에서 녹았다.
+SEARCH_AMP   = math.radians(50)  # 사인파 폴백 진폭(기본값)
 SEARCH_OMEGA = 0.6               # 사인파 각속도 (rad/s) — 낮출수록 위치 오차 줄어듦
 KP_SRCH      = 2.0              # 스캔 P 게인 (rad/s per rad)
 
@@ -68,6 +90,18 @@ INSPECT_SAMPLES     = 5                   # 정지·조준 상태에서 모을 �
 INSPECT_TIMEOUT_S   = 28.0                # 전체 한도 (대상까지 접근 + 정지 + 포탑 슬루)
 INSPECT_AFTER_AIM_S = 2.5                 # 조준 완료 후 대상이 안 보일 때 포기까지
 MAX_SAMPLE_SPREAD   = 0.30                # 표본이 이보다 흩어지면 등록 보류 (m)
+# 반복 유령 자리 — 조준까지 했는데 아무것도 없던 곳을 기억해 다시 안 선다.
+# 유령 하나에 10~15초를 쓰고, 실측으로 25건과 41건이 700초/2672초 차이의
+# 일부였다. GHOST_NEED 를 0 으로 두면 이 기능이 꺼진다.
+#
+# 기본값 0(끔). 큰 월드 2대에서 재 봤고 이득이 없었다.
+#   base 5.14  ghost 5.38  (조건당 13~14런)
+# 머신별로 순위가 뒤집혔다 — 메인에서는 1위(6.4), OMEN 에서는 꼴찌(4.6).
+# 진짜 효과라면 그럴 수 없다. 유령이 시간을 잡아먹는 건 사실이지만, 막아서
+# 아낀 시간이 발견 인원으로 이어지지는 않았다.
+# 기능은 남겨 둔다. 유령이 많은 환경이 확인되면 켜면 된다.
+GHOST_SPOT_R        = 1.5                 # 같은 자리로 볼 반경 (m)
+GHOST_NEED          = 0                   # 몇 번 반복돼야 막을지 (0=끔)
 # 등록을 허용하는 최대 관측 거리.
 # 먼 거리 관측이 등록으로 이어지면 안 된다. 실제로 6.8~14.8m 에서 잡힌
 # 엉터리 투영 4건이 별개 조난자로 등록됐다(모두 같은 사람을 멀리서 잘못
@@ -104,28 +138,57 @@ def get_room_name(x, y):
     return 'Main Hall'
 
 
+def add_ghost_spot(gx, gy, spots, radius):
+    """유령으로 판명된 자리를 쌓는다. spots 는 [x, y, 횟수] 목록.
+
+    가까운 자리는 하나로 묶고 횟수만 올린다. 위치는 이동평균으로 다듬어
+    조금씩 어긋나는 관측이 여러 자리로 흩어지지 않게 한다.
+    """
+    for spot in spots:
+        if math.hypot(gx - spot[0], gy - spot[1]) < radius:
+            n = spot[2]
+            spot[0] = (spot[0] * n + gx) / (n + 1)
+            spot[1] = (spot[1] * n + gy) / (n + 1)
+            spot[2] = n + 1
+            return
+    spots.append([gx, gy, 1])
+
+
+def ghost_blocked(gx, gy, spots, radius, need):
+    """이 자리가 반복 유령으로 확인돼 이미 막혔는가.
+
+    한 번으로 막지 않는 이유: 진짜 조난자가 잠깐 가려져 유령으로 판명될 수
+    있다. 그걸 영구히 버리면 손해가 훨씬 크다. 같은 자리에서 need 번
+    반복될 때만 막는다.
+    """
+    for (sx, sy, n) in spots:
+        if n >= need and math.hypot(gx - sx, gy - sy) < radius:
+            return True
+    return False
+
+
 class TargetManager(Node):
     def __init__(self):
         super().__init__('target_manager_node')
 
         # ── 구독 ─────────────────────────────────────────────────────
-        self.create_subscription(TargetDetection, '/target_detection',  self.target_cb,        10)
-        self.create_subscription(Odometry,        '/odom',              self.odom_cb,           10)
-        self.create_subscription(Joy,             '/joy',               self.joy_cb,            10)
-        self.create_subscription(JointState,      '/joint_states',      self.joint_cb,          10)
-        self.create_subscription(JointState,      '/measured_joint_states', self.joint_cb,      10)
-        self.create_subscription(Point,           '/apex_aim_point',    self._apex_aim_cb,      10)
-        self.create_subscription(MarkerArray,     '/viz/blind_corners', self._blind_corners_cb, 10)
+        self.create_subscription(TargetDetection, 'target_detection',  self.target_cb,        10)
+        self.create_subscription(Odometry,        'odom',              self.odom_cb,           10)
+        self.create_subscription(Joy,             'joy',               self.joy_cb,            10)
+        self.create_subscription(JointState,      'joint_states',      self.joint_cb,          10)
+        self.create_subscription(JointState,      'measured_joint_states', self.joint_cb,      10)
+        self.create_subscription(Point,           'apex_aim_point',    self._apex_aim_cb,      10)
+        self.create_subscription(MarkerArray,     'viz/blind_corners', self._blind_corners_cb, 10)
 
         # ── 퍼블리시 ──────────────────────────────────────────────────
-        self.yaw_pub    = self.create_publisher(Float64,     '/turret_yaw_cmd',   10)
-        self.pitch_pub  = self.create_publisher(Float64,     '/turret_pitch_cmd', 10)
-        self.turret_pub = self.create_publisher(Vector3,     '/turret_cmd',       10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/patient_markers',  10)
-        self.arrow_pub  = self.create_publisher(Marker,      '/turret_heading',   10)
+        self.yaw_pub    = self.create_publisher(Float64,     'turret_yaw_cmd',   10)
+        self.pitch_pub  = self.create_publisher(Float64,     'turret_pitch_cmd', 10)
+        self.turret_pub = self.create_publisher(Vector3,     'turret_cmd',       10)
+        self.marker_pub = self.create_publisher(MarkerArray, 'patient_markers',  10)
+        self.arrow_pub  = self.create_publisher(Marker,      'turret_heading',   10)
         # 정지 조준 확인 핸드셰이크 — patrol_navigator 가 소비
-        self.inspect_req_pub  = self.create_publisher(PointStamped, '/inspect_request', 10)
-        self.inspect_done_pub = self.create_publisher(Bool,         '/inspect_done',    10)
+        self.inspect_req_pub  = self.create_publisher(PointStamped, 'inspect_request', 10)
+        self.inspect_done_pub = self.create_publisher(Bool,         'inspect_done',    10)
 
         # ── TF2 버퍼 (map → base_footprint 로봇 자세) ────────────────
         self._tf_buf = tf2_ros.Buffer(cache_time=Duration(seconds=30))
@@ -160,6 +223,12 @@ class TargetManager(Node):
         self._scan_update_t  = 0.0
 
         # 카메라 수평 FOV — 시뮬 1.089rad(62°) / 실기 D435i 87°
+        # 로봇이 둘이면 프레임이 ugv1/map, ugv2/map 으로 갈린다.
+        # 기본값은 1대 구성과 같다.
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.map_frame  = self.get_parameter('map_frame').value
+        self.base_frame = self.get_parameter('base_frame').value
         self.declare_parameter('cam_fov_rad', CAM_FOV_RAD)
         self.cam_fov = float(self.get_parameter('cam_fov_rad').value)
 
@@ -169,6 +238,45 @@ class TargetManager(Node):
         self._inspect_start_t     = 0.0
         self._inspect_aim: tuple[float, float] | None = None   # 조준 목표 (map)
         self._inspect_samples: list[tuple[float, float]] = []
+        self._ghost_spots: list[list] = []     # [x, y, 횟수]
+        # 몇 번 반복돼야 그 자리를 막을지. 0 이면 이 기능이 꺼진다.
+        # 탐색 중 포탑 기본 각도(rad). 양수가 아래를 본다. 관절 한계 +-0.52.
+        #
+        # 0(수평)이 기본이었는데 바닥에 누운 사람을 놓치는 원인이었다.
+        # 큰 월드 2머신 18런으로 0.20(아래 11.5도)과 비교했다.
+        #
+        # 그 뒤 0.10 / 0.20 / 0.30 을 오로라 18런(값당 6런)으로 훑어 0.10 이
+        # 최적임을 확인했다. 처음 고른 0.20 이 최적은 아니었다.
+        #
+        #   각도    누움      서있음    7/7
+        #   0.10   18/18    18/18    6/6    <- 채택
+        #   0.20   16/18    16/18    4/6
+        #   0.30   15/18    17/18    4/6
+        #
+        # 0.30 은 위쪽 시야가 7.3도까지 줄어 오히려 나빠진다. 0.10 이면
+        # 18.7도를 남기면서 화면 아래끝이 1.10m -> 0.86m 로 당겨진다.
+        #
+        # 아래는 0.20 을 처음 채택할 때의 근거다(수평 대비).
+        #   누운 3명 발견률   0.20: 21/27(78%)   0(수평): 14/27(52%)
+        #   서있는 사람       양쪽 9/9 — 위쪽 시야가 줄어도 손해가 없었다
+        #   누움 최소 검출거리 0.20: 1.3m        0: 2.0m
+        #   유령             1건/9런 vs 0건/9런 (차이 없음)
+        #   머신별로도 둘 다 같은 방향(메인 6/12->11/12, 오로라 8/15->10/15)
+        #
+        # 최소 검출 거리가 짧아진 것이 메커니즘 증거다. 화면 아래끝이
+        # 바닥과 만나는 지점이 1.10m -> 0.69m 로 당겨져 가까운 거리에서
+        # 몸이 안 잘린다.
+        # 사인파 스캔 범위·속도. 검출 창이 좁아 스쳐 지나가는 일이 있어
+        # 재보려고 열어 둔다. 기본값은 지금까지의 동작과 같다.
+        self.declare_parameter('search_amp_deg', 50.0)
+        self.declare_parameter('search_omega', 0.6)
+        self.search_amp = math.radians(
+            float(self.get_parameter('search_amp_deg').value))
+        self.search_omega = float(self.get_parameter('search_omega').value)
+        self.declare_parameter('search_pitch', 0.10)
+        self.search_pitch = float(self.get_parameter('search_pitch').value)
+        self.declare_parameter('ghost_need', GHOST_NEED)
+        self.ghost_need = int(self.get_parameter('ghost_need').value)
         self._inspect_settled_t: float | None = None   # 정지+조준이 붙은 시각
 
         # ── 환자 등록부 ───────────────────────────────────────────────
@@ -179,7 +287,28 @@ class TargetManager(Node):
         self.create_timer(0.05, self.control_loop)
         self.create_timer(0.1,  self._publish_turret_arrow)
         self.create_timer(1.0,  self.republish_markers)
+
+        # ── 궤적 기록(진단 전용) ──────────────────────────────────────
+        # 로그만 남긴다. 판단도 제어도 하지 않는다.
+        #
+        # 왜 필요한가: 조난자를 놓친 런에서 '안 갔다(커버리지)' 와 '갔는데 못
+        # 알아봤다(인식)' 는 처방이 정반대인데, 지금 로그로는 갈리지 않는다.
+        # 탐사 목표는 '가려던 곳' 이지 '간 곳' 이 아니고, 오탐 게이트 기각은
+        # 15초마다 개수만 찍혀 어느 자리에서 났는지 알 수 없다.
+        #
+        # 1Hz 로 자세를 남겨 두면 기각이 난 15초 구간에 로봇이 어디 있었는지
+        # 붙일 수 있다. 그 사이 로봇은 멀리 못 가므로 자리 특정에 충분하다.
+        # 끄면 이 분석이 통째로 불가능해지므로 기본은 켠 채로 둔다.
+        self.declare_parameter('trace_pose', True)
+        if bool(self.get_parameter('trace_pose').value):
+            self.create_timer(1.0, self._trace_pose)
+
         self.get_logger().info('TargetManager v7 시작 — 블라인드코너 지능형 스캔')
+
+    def _trace_pose(self):
+        """1Hz 로봇 자세 기록 — 기각·미발견을 자리에 붙이기 위한 것."""
+        x, y, th = self._map_frame_robot_pose()
+        self.get_logger().info(f'[궤적] ({x:.2f},{y:.2f}) yaw={th:.2f}')
 
     # ── TF2 유틸 ──────────────────────────────────────────────────────
 
@@ -187,7 +316,7 @@ class TargetManager(Node):
         """map 프레임에서 로봇 자세(x, y, theta). TF 실패 시 odom 폴백."""
         try:
             tf = self._tf_buf.lookup_transform(
-                'map', 'base_footprint', rclpy.time.Time())
+                self.map_frame, self.base_frame, rclpy.time.Time())
             x = tf.transform.translation.x
             y = tf.transform.translation.y
             q = tf.transform.rotation
@@ -284,7 +413,21 @@ class TargetManager(Node):
         return slewed
 
     def _pitch_to_neutral(self) -> float:
-        raw = KP_SRCH * (0.0 - self.turret_pitch)
+        """탐색 중 포탑을 기본 각도로 되돌린다.
+
+        기본값이 0(수평)이면 바닥에 누운 사람을 놓친다. 카메라 높이 0.5m,
+        수직 FOV 48.9도라 화면 아래끝이 바닥과 만나는 지점이 1.1m 다.
+        그보다 가까운 바닥은 아예 안 찍힌다.
+
+        실측: 누운 조난자 검출 성공 거리가 2.3~4.9m 에 몰려 있고 2.3m 보다
+        가까운 성공이 한 건도 없다(서있는 사람은 3.5~5.5m). 실제 사진에서도
+        2m 앞 누운 사람이 신발과 다리만 화면에 걸리고 몸통·머리는 아래로
+        잘려 검출이 안 됐다.
+
+        아래로 조금 기울이면 그 지점이 앞으로 당겨져 가까운 거리에서도
+        몸 전체가 들어온다. 양수가 아래 방향이다(Y축 회전).
+        """
+        raw = KP_SRCH * (self.search_pitch - self.turret_pitch)
         return self._apply_pitch_slew(raw)
 
     def _cmd_turret(self, yaw_vel, pitch_vel, z_flag=0.0):
@@ -366,6 +509,9 @@ class TargetManager(Node):
                     return
             elif self._is_ignored(gx, gy):
                 return
+            if self.ghost_need > 0 and ghost_blocked(
+                    gx, gy, self._ghost_spots, GHOST_SPOT_R, self.ghost_need):
+                return          # 여기서 이미 여러 번 헛걸음했다
             self._inspect_active     = True
             self._inspect_start_t    = now_sec
             self._inspect_aim        = (gx, gy)
@@ -408,6 +554,9 @@ class TargetManager(Node):
         # 겨눴는데도 대상이 안 보이면 유령 후보 → 조기 포기
         if (self._inspect_settled_t is not None and not target_fresh
                 and now_sec - self._inspect_settled_t > INSPECT_AFTER_AIM_S):
+            if self._inspect_aim is not None:
+                add_ghost_spot(self._inspect_aim[0], self._inspect_aim[1],
+                               self._ghost_spots, GHOST_SPOT_R)
             self.get_logger().info(
                 '조준 완료했는데 대상 없음 — 유령 후보로 판단, 순찰 재개')
             self._finish_inspect(registered=False)
@@ -439,7 +588,7 @@ class TargetManager(Node):
 
     def _publish_inspect_request(self, gx, gy):
         p = PointStamped()
-        p.header.frame_id = 'map'
+        p.header.frame_id = self.map_frame
         p.header.stamp = self.get_clock().now().to_msg()
         p.point.x, p.point.y, p.point.z = float(gx), float(gy), 0.5
         self.inspect_req_pub.publish(p)
@@ -520,7 +669,7 @@ class TargetManager(Node):
 
     def _mk_sphere(self, pid, x, y, lv):
         m = Marker()
-        m.header.frame_id = 'map'; m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.map_frame; m.header.stamp = self.get_clock().now().to_msg()
         m.ns = 'patient_sphere'; m.id = pid * 3
         m.type = Marker.SPHERE; m.action = Marker.ADD
         m.pose.position.x = x; m.pose.position.y = y; m.pose.position.z = 0.3
@@ -533,7 +682,7 @@ class TargetManager(Node):
 
     def _mk_ring(self, pid, x, y, lv):
         m = Marker()
-        m.header.frame_id = 'map'; m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.map_frame; m.header.stamp = self.get_clock().now().to_msg()
         m.ns = 'patient_ring'; m.id = pid * 3 + 1
         m.type = Marker.CYLINDER; m.action = Marker.ADD
         m.pose.position.x = x; m.pose.position.y = y; m.pose.position.z = 0.05
@@ -546,7 +695,7 @@ class TargetManager(Node):
 
     def _mk_text(self, pid, x, y, lv, label):
         m = Marker()
-        m.header.frame_id = 'map'; m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.map_frame; m.header.stamp = self.get_clock().now().to_msg()
         m.ns = 'patient_text'; m.id = pid * 3 + 2
         m.type = Marker.TEXT_VIEW_FACING; m.action = Marker.ADD
         m.pose.position.x = x; m.pose.position.y = y; m.pose.position.z = 1.0
@@ -571,7 +720,7 @@ class TargetManager(Node):
         rx, ry, rtheta = self._map_frame_robot_pose()
         cam_angle = rtheta + self.turret_yaw
         m = Marker()
-        m.header.frame_id = 'map'; m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.map_frame; m.header.stamp = self.get_clock().now().to_msg()
         m.ns = 'turret_heading'; m.id = 0
         m.type = Marker.ARROW; m.action = Marker.ADD
         start = Point(); start.x = rx; start.y = ry; start.z = 0.5
@@ -662,7 +811,7 @@ class TargetManager(Node):
                     self._scan_arrive_t = None  # 이동 중 → 도달 타이머 리셋
             else:
                 # 블라인드코너 없음 → 사인파 폴백
-                target_yaw = SEARCH_AMP * math.sin(now_sec * SEARCH_OMEGA)
+                target_yaw = self.search_amp * math.sin(now_sec * self.search_omega)
 
         yaw_vel   = KP_SRCH * (target_yaw - self.turret_yaw)
         pitch_vel = self._pitch_to_neutral()

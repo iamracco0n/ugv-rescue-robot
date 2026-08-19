@@ -1,0 +1,76 @@
+{
+  "world": "rescue_building_large",
+  "victims": [
+    {
+      "name": "victim_standing_n1",
+      "x": -22.0,
+      "y": 16.0,
+      "triage": 3,
+      "model": "Standing%20person"
+    },
+    {
+      "name": "victim_lying_n3",
+      "x": -1.0,
+      "y": 15.5,
+      "triage": 1,
+      "model": "Casual%20female"
+    },
+    {
+      "name": "victim_lying_s2",
+      "x": -14.0,
+      "y": -16.0,
+      "triage": 1,
+      "model": "Standing%20person"
+    },
+    {
+      "name": "victim_sitting_n4",
+      "x": 12.0,
+      "y": 10.0,
+      "triage": 2,
+      "model": "PatientWheelChair"
+    },
+    {
+      "name": "victim_lying_s4",
+      "x": 9.0,
+      "y": -14.0,
+      "triage": 1,
+      "model": "Standing%20person"
+    },
+    {
+      "name": "victim_occluded_s1",
+      "x": -23.5,
+      "y": -16.0,
+      "triage": 3,
+      "model": "Casual%20female"
+    },
+    {
+      "name": "victim_corridor_e",
+      "x": 24.0,
+      "y": 0.5,
+      "triage": 3,
+      "model": "Standing%20person"
+    }
+  ],
+  "fires": [
+    {
+      "name": "fire_source_1",
+      "x": -24.0,
+      "y": 8.0
+    },
+    {
+      "name": "fire_source_2",
+      "x": 22.0,
+      "y": -17.0
+    },
+    {
+      "name": "fire_source_3",
+      "x": 1.0,
+      "y": -17.5
+    },
+    {
+      "name": "fire_source_4",
+      "x": -26.0,
+      "y": -0.5
+    }
+  ]
+}

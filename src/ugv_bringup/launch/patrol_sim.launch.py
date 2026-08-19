@@ -16,6 +16,13 @@ def generate_launch_description():
     Gazebo/브리지는 gazebo.launch.py 를 그대로 재사용(열화상 브리지 포함).
     """
 
+    # 누운 사람 관문 완화 스위치(측정용).
+    # 기본값은 본 코드 기본값과 같고, 완화 이전 동작을 재려면
+    #   UGV_LYING_KPTS=6 UGV_LYING_CONF=0.50
+    # 으로 돌리면 된다. 다시 빌드하지 않으므로 두 조건이 같은 바이너리다.
+    LYING_KPTS = int(os.environ.get('UGV_LYING_KPTS', '6'))
+    LYING_CONF = float(os.environ.get('UGV_LYING_CONF', '0.50'))
+
     patrol_arg = DeclareLaunchArgument(
         'patrol_enabled_on_boot',
         default_value='true',
@@ -108,7 +115,13 @@ def generate_launch_description():
         actions=[
             Node(package='ugv_vision', executable='yolo_pose_node',
                  name='yolo_pose_node',
-                 parameters=[{'use_sim_time': True}], output='screen'),
+                 parameters=[{'use_sim_time': True,
+                              # 누운 사람 관문 완화를 껐다 켰다 하며 재기 위한 것.
+                              # 조건마다 다시 빌드하면 빌드 차이가 섞이므로
+                              # 파라미터로 가른다. 6/0.50 이면 완화 이전과 같다.
+                              'lying_min_kpts': LYING_KPTS,
+                              'lying_kpt_conf': LYING_CONF}],
+                 output='screen'),
             Node(package='ugv_vision', executable='target_manager_node',
                  name='target_manager_node',
                  parameters=[{'use_sim_time': True}], output='screen'),

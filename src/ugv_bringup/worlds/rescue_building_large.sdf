@@ -621,9 +621,9 @@
     </include>
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Casual%20female</uri>
-      <name>victim_female_n3</name>
+      <name>victim_lying_n3</name>
       <static>true</static>
-      <pose>-1.0 15.5 0 0 0 2.0</pose>
+      <pose>-1.0 15.5 0.15 0 -1.5708 2.0</pose>
     </include>
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Standing%20person</uri>
@@ -638,10 +638,10 @@
       <pose>12.0 10.0 0 0 0 1.2</pose>
     </include>
     <include>
-      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/TrolleyBedPatient</uri>
-      <name>victim_bed_s4</name>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Standing%20person</uri>
+      <name>victim_lying_s4</name>
       <static>true</static>
-      <pose>9.0 -14.0 0 0 0 0.3</pose>
+      <pose>9.0 -14.0 0.15 0 -1.5708 0.3</pose>
     </include>
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Casual%20female</uri>

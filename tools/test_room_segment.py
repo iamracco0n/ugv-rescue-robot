@@ -16,43 +16,35 @@
 """
 import sys
 
+import ast
+import os
+
 import numpy as np
 from scipy import ndimage
 
+SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                   '..', 'src', 'ugv_vision', 'ugv_vision',
+                   'patrol_navigator.py')
 
-def segment_room(free, ry, rx, erode_cells):
-    """로봇이 있는 방 마스크를 돌려준다.
 
-    free        : bool 배열 (자유공간 True)
-    ry, rx      : 로봇 셀 좌표
-    erode_cells : 침식 반경(셀). **문 폭의 절반보다 커야** 문이 끊긴다.
-                  문 1.8m·해상도 0.05m 면 36셀이므로 19셀 이상 필요하다.
+def load(name):
+    """실제로 도는 코드에서 함수를 떼어 온다.
 
-    거리변환을 쓴다. binary_erosion 을 반복하면 4-연결 구조라 마름모꼴로
-    깎이고 반복 횟수만큼 느리다. distance_transform_edt 는 한 번에 정확한
-    원형 침식을 준다.
-
-    문이 끊겨 방이 분리되면 그 덩어리만, 넓어서 안 끊기면(홀) 통째로 나온다.
+    전에는 이 파일이 자기 복사본을 검사했다. 그러면 본 코드가 달라져도
+    테스트는 계속 통과한다 — 실제로 본 코드에 팽창 방식이 들어갔는데도
+    이 테스트는 초록이었다.
     """
-    if not free[ry, rx]:
-        return None
-    # 벽까지의 거리. 이 값이 침식 반경보다 큰 곳이 '방의 속살'
-    dist = ndimage.distance_transform_edt(free)
-    core = dist > erode_cells
-    lbl, n = ndimage.label(core, structure=np.ones((3, 3), bool))
-    if n == 0:
-        return None
-    # 모든 자유공간 셀을 '가장 가까운 속살' 에 귀속시킨다(분수령).
-    # 침식한 만큼 되돌리는 방식(팽창)을 쓰면 문틈으로 새어 옆방을 침범한다
-    # (실측: 왼방 코어를 20셀 팽창하니 오른방을 6셀 침범, 140셀 오염).
-    # 귀속 방식은 문 한가운데서 자연스럽게 갈려 새지 않는다.
-    idx = ndimage.distance_transform_edt(
-        lbl == 0, return_distances=False, return_indices=True)
-    owner = lbl[idx[0], idx[1]]
-    my = owner[ry, rx]
-    if my == 0:
-        return None
-    return (owner == my) & free
+    tree = ast.parse(open(SRC, encoding='utf-8').read())
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            mod = ast.Module(body=[node], type_ignores=[])
+            ns = {'np': np, 'ndimage': ndimage}
+            exec(compile(mod, SRC, 'exec'), ns)
+            return ns[name]
+    raise SystemExit(f'{SRC} 에 {name} 함수가 없다')
+
+
+segment_room = load('segment_room')
 
 
 RES = 0.05                     # m/셀 — 실제 SLAM 지도와 같게

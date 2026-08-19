@@ -130,6 +130,50 @@ RViz `2D Goal Pose`로 목표를 보내면 순찰이 잠시 멈추고 그쪽으�
 
 ---
 
+## 3.5 로봇 2대로 돌리기
+
+```bash
+cd ~/ugv_ws
+source /opt/ros/humble/setup.bash
+source ~/ugv_ws/install/setup.bash
+export GZ_SIM_RESOURCE_PATH=~/ugv_ws/install/ugv_description/share:$GZ_SIM_RESOURCE_PATH
+
+UGV_N_ROBOTS=2 UGV_BOUNDS=-27,-19,27,19 \
+  ros2 launch ugv_bringup multi_robot_sim.launch.py \
+    world:=rescue_building_large expected_victims:=7
+```
+
+`UGV_BOUNDS` 는 **월드마다 달라야 합니다**. 외벽 안쪽으로 잡으세요.
+
+| 월드 | 값 |
+|---|---|
+| `rescue_building_large` (56×40 m) | `-27,-19,27,19` |
+| `rescue_building` (28×20 m) | `-13,-9,13,9` |
+
+값이 월드보다 크면 벽 밖 경계가 후보로 잡혀 **수색이 영영 안 끝납니다.**
+
+RViz 는 `ugv_multi.rviz` 를 쓰세요. 로봇별로 색이 다른 경로가 나옵니다.
+
+### 환경변수 스위치
+
+실험용으로 열어 둔 것들입니다. **기본값이 검증된 설정**이므로 그냥 두고
+쓰면 됩니다.
+
+| 변수 | 기본 | 무엇 |
+|---|---|---|
+| `UGV_N_ROBOTS` | 2 | 로봇 수 |
+| `UGV_BOUNDS` | 큰 월드 | 탐사 범위 |
+| `UGV_SPLIT` | 1 | 구역 분할(0=안 나눔) |
+| `UGV_SPAWN_DELAY` | 8 | 스폰 대기(초). 느린 머신은 25~30 |
+| `UGV_SEEN_DIRS` | 1 | 관측 방향 기록(끔) |
+| `UGV_GHOST_NEED` | 0 | 유령 자리 기억(끔) |
+| `UGV_ROOM_BONUS` | 0 | 방 우선 보너스(끔) |
+| `UGV_DET_CONF` | 0.50 | YOLO 박스 신뢰도 하한 |
+| `UGV_CAM_MIN` | 0.3 | 이보다 가까운 바닥은 '봤음' 으로 안 침 |
+
+느린 머신에서 스폰이 타임아웃나면(`[create] ... timed out`) 로봇이 아예
+안 생기고 TF·Nav2 가 줄줄이 실패합니다. `UGV_SPAWN_DELAY=30` 으로 늘리세요.
+
 ## 4. 그 외 (필요할 때만)
 
 ### Gazebo + RViz만 (SLAM/Nav 없이 순수 시뮬 확인)
@@ -247,6 +291,31 @@ kill -9 <PID>
 > 명령 안에 그 문자열이 들어 있기 때문이다. PID로 지울 것.
 
 ---
+
+## 7.5 실험을 여러 번 돌릴 때
+
+`tools/bench/` 에 실행·집계 스크립트가 있습니다. 설계 규칙은
+`tools/bench/README.md` 를 보세요.
+
+**런 사이에 반드시 `tools/kill_sim.sh` 를 부르세요.**
+
+```bash
+bash tools/kill_sim.sh
+```
+
+`ros2 launch` 만 죽이면 그 아래 노드들이 고아로 남습니다. 쌓이면 CPU 가
+모자라 깊이 영상이 끊기고 **검출이 조용히 0 이 됩니다** — Xid 도 없고
+`nvidia-smi` 도 정상이고 탐사 목표도 계속 나오는데 눈만 멉니다. 실제로 한
+머신에 5벌이 쌓여 GPU 고장으로 오진한 적이 있습니다.
+
+의심되면 카메라 수신율을 보세요.
+
+```bash
+DOM=<도메인> bash tools/cam_hz.sh
+```
+
+깊이 영상 편차가 크거나 공백이 몇 초씩이면 그 런은 버려야 합니다
+(정상: RGB·깊이 모두 약 14.8Hz, 편차 0.01 이하).
 
 ## 8. 트러블슈팅
 

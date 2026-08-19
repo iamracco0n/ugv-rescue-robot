@@ -69,10 +69,20 @@ class FireDetectionNode(Node):
         super().__init__('fire_detection_node')
 
         # ── 파라미터 ─────────────────────────────────────────────────
-        self.declare_parameter('thermal_topic', '/thermal/image_raw')
+        # 로봇이 둘이면 프레임이 ugv1/map, ugv2/map 으로 갈린다.
+        # 기본값은 1대 구성과 같다.
+        self.declare_parameter('map_frame', 'map')
+        # 동료 로봇 이름들. 비우면 1대 구성과 같다.
+        # 동료가 확정한 화재를 받아 내 목록에 합친다. 안 하면 두 로봇이
+        # 같은 불을 각각 세어 정답(4건)보다 많이 보고한다(실측 7/4).
+        self.declare_parameter('peers', [''])
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.map_frame  = self.get_parameter('map_frame').value
+        self.base_frame = self.get_parameter('base_frame').value
+        self.declare_parameter('thermal_topic', 'thermal/image_raw')
         self.declare_parameter('depth_topic',
-                               '/camera/camera/aligned_depth_to_color/image_raw')
-        self.declare_parameter('rgb_topic', '/camera/camera/color/image_raw')
+                               'camera/camera/aligned_depth_to_color/image_raw')
+        self.declare_parameter('rgb_topic', 'camera/camera/color/image_raw')
         self.declare_parameter('fire_temp_threshold_k', 380.0)   # 이 온도[K] 이상이면 화재
         self.declare_parameter('linear_resolution', 0.01)        # 16bit 픽셀 1 = 0.01K
         self.declare_parameter('min_blob_area', 25)              # 최소 blob 픽셀 수
@@ -161,6 +171,9 @@ class FireDetectionNode(Node):
         self._ci_failed: list[tuple] = []         # [(x, y, 실패시각)]
         # 화재 소스: {'x','y','peak_k','hits','confirmed'}
         self.fires: list[dict] = []
+        for _peer in [x for x in self.get_parameter('peers').value if x]:
+            self.create_subscription(
+                PointStamped, f'/{_peer}/fire_alert', self._peer_fire_cb, 10)
         # 누적 열장 (0..100, 0=미검출)
         self.heat = np.zeros((_N, _N), dtype=np.float32)
 
@@ -173,21 +186,21 @@ class FireDetectionNode(Node):
         self.create_subscription(Image,      self.thermal_topic, self.thermal_cb, 5)
         self.create_subscription(Image,      self.depth_topic,   self.depth_cb,   5)
         self.create_subscription(Image,      self.rgb_topic,     self.rgb_cb,     5)
-        self.create_subscription(Odometry,   '/odom',            self.odom_cb,    10)
+        self.create_subscription(Odometry,   'odom',            self.odom_cb,    10)
         # SLAM 맵 — 화재 추정 위치가 벽 안쪽으로 찍히는 것을 걸러내는 데 사용
-        self.create_subscription(OccupancyGrid, '/map',           self.slam_map_cb, 1)
-        self.create_subscription(JointState, '/joint_states',    self.joint_cb,   10)
+        self.create_subscription(OccupancyGrid, 'map',           self.slam_map_cb, 1)
+        self.create_subscription(JointState, 'joint_states',    self.joint_cb,   10)
 
         # ── 발행 ─────────────────────────────────────────────────────
-        self.pub_heat   = self.create_publisher(OccupancyGrid, '/fire_heatmap', _LATCH_QOS)
-        self.pub_cloud  = self.create_publisher(PointCloud2,   '/fire_cloud',   10)
-        self.pub_marker = self.create_publisher(MarkerArray,   '/fire_markers', 10)
-        self.pub_alert  = self.create_publisher(PointStamped,  '/fire_alert',   10)
+        self.pub_heat   = self.create_publisher(OccupancyGrid, 'fire_heatmap', _LATCH_QOS)
+        self.pub_cloud  = self.create_publisher(PointCloud2,   'fire_cloud',   10)
+        self.pub_marker = self.create_publisher(MarkerArray,   'fire_markers', 10)
+        self.pub_alert  = self.create_publisher(PointStamped,  'fire_alert',   10)
         # 정지 조준 확인 핸드셰이크 — patrol_navigator 가 소비
-        self.pub_ci_req  = self.create_publisher(PointStamped, '/fire_candidate',    10)
-        self.pub_ci_done = self.create_publisher(Bool,         '/fire_inspect_done', 10)
+        self.pub_ci_req  = self.create_publisher(PointStamped, 'fire_candidate',    10)
+        self.pub_ci_done = self.create_publisher(Bool,         'fire_inspect_done', 10)
         # 불 박스 오버레이 이미지 → rqt_image_view / RViz Image
-        self.pub_img    = self.create_publisher(Image,         '/fire/image_annotated', 5)
+        self.pub_img    = self.create_publisher(Image,         'fire/image_annotated', 5)
 
         self.create_timer(0.5, self.publish_all)   # 2 Hz
         self.create_timer(0.5, self._ci_timer)     # 조준 확인 타임아웃 감시
@@ -243,7 +256,7 @@ class FireDetectionNode(Node):
     def _robot_pose(self):
         """map 프레임 로봇 자세 (TF), 실패 시 odom 값."""
         try:
-            tf = self._tf_buf.lookup_transform('map', 'base_footprint', Time())
+            tf = self._tf_buf.lookup_transform(self.map_frame, self.base_frame, Time())
             t = tf.transform.translation
             return t.x, t.y, _yaw_from_quat(tf.transform.rotation)
         except Exception:
@@ -485,7 +498,7 @@ class FireDetectionNode(Node):
             self._ci_settled = None
             self._ci_samples = []
             p = PointStamped()
-            p.header.frame_id = 'map'
+            p.header.frame_id = self.map_frame
             p.header.stamp = self.get_clock().now().to_msg()
             p.point.x, p.point.y, p.point.z = float(fx), float(fy), 0.5
             self.pub_ci_req.publish(p)
@@ -561,6 +574,23 @@ class FireDetectionNode(Node):
         m = Bool(); m.data = bool(ok)
         self.pub_ci_done.publish(m)
 
+    def _peer_fire_cb(self, msg: PointStamped):
+        """동료가 확정한 화재를 내 목록에 합친다.
+
+        이미 아는 불이면 무시한다. 새 불이면 '확정' 으로 바로 넣는다 —
+        동료가 이미 조준 확인까지 마친 것이라 다시 검증할 이유가 없다.
+        경보를 다시 쏘지는 않는다(그러면 둘이 서로 메아리를 주고받는다).
+        """
+        fx, fy = msg.point.x, msg.point.y
+        for f in self.fires:
+            if math.hypot(f['x'] - fx, f['y'] - fy) < self.merge_d:
+                return
+        self.fires.append({'x': fx, 'y': fy, 'peak_k': 0.0,
+                           'hits': self.confirm_hits, 'confirmed': True})
+        self._paint_bloom(fx, fy)
+        self.get_logger().info(
+            f'동료가 찾은 화재 합침 map ({fx:.1f}, {fy:.1f}) — 총 {len(self.fires)}건')
+
     def _register_fire(self, fx, fy, peak_k):
         # 기존 화재와 병합
         for f in self.fires:
@@ -586,7 +616,7 @@ class FireDetectionNode(Node):
 
     def _emit_alert(self, fx, fy):
         p = PointStamped()
-        p.header.frame_id = 'map'
+        p.header.frame_id = self.map_frame
         p.header.stamp = self.get_clock().now().to_msg()
         p.point.x = fx
         p.point.y = fy
@@ -627,7 +657,7 @@ class FireDetectionNode(Node):
     def _publish_heatmap(self, stamp):
         og = OccupancyGrid()
         og.header.stamp = stamp
-        og.header.frame_id = 'map'
+        og.header.frame_id = self.map_frame
         og.info.resolution = _RES
         og.info.width = _N
         og.info.height = _N
@@ -654,7 +684,7 @@ class FireDetectionNode(Node):
                     pts.append((f['x'] + dx, f['y'] + dy, 0.3))
         header = Header()
         header.stamp = stamp
-        header.frame_id = 'map'
+        header.frame_id = self.map_frame
         cloud = point_cloud2.create_cloud_xyz32(header, pts)
         self.pub_cloud.publish(cloud)
 
@@ -662,14 +692,14 @@ class FireDetectionNode(Node):
         ma = MarkerArray()
         # 오래된 마커 삭제
         clear = Marker()
-        clear.header.frame_id = 'map'
+        clear.header.frame_id = self.map_frame
         clear.action = Marker.DELETEALL
         ma.markers.append(clear)
         for idx, f in enumerate(self.fires):
             if not f['confirmed']:
                 continue
             m = Marker()
-            m.header.frame_id = 'map'
+            m.header.frame_id = self.map_frame
             m.header.stamp = stamp
             m.ns = 'fire'
             m.id = idx
@@ -687,7 +717,7 @@ class FireDetectionNode(Node):
             ma.markers.append(m)
 
             t = Marker()
-            t.header.frame_id = 'map'
+            t.header.frame_id = self.map_frame
             t.header.stamp = stamp
             t.ns = 'fire_label'
             t.id = 1000 + idx

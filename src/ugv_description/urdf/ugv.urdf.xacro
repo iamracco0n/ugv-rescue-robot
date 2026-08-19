@@ -1,6 +1,17 @@
 <?xml version="1.0"?>
 <robot name="ugv" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
+  <!-- 로봇 2대를 한 월드에 띄우기 위한 접두사.
+       비워 두면 지금까지와 완전히 같은 이름이 나온다(1대 구성 그대로).
+       'ugv1/' 처럼 주면 TF 프레임은 ugv1/base_footprint, gz 센서 토픽은
+       /ugv1/scan 이 된다.
+
+       gz 토픽을 반드시 명시해야 하는 이유: 상대 토픽(cmd_vel, odom)이
+       모델 스코프가 아니라 루트로 해석된다(실측 gz topic -l 에서 /cmd_vel).
+       접두사를 안 붙이면 두 로봇이 같은 /cmd_vel 을 받아 함께 움직인다. -->
+  <xacro:arg name="prefix" default=""/>
+  <xacro:property name="P" value="$(arg prefix)"/>
+
   <material name="black"><color rgba="0.1 0.1 0.1 1"/></material>
   <material name="dark_gray"><color rgba="0.3 0.3 0.3 1"/></material>
   <material name="gray"><color rgba="0.5 0.5 0.5 1"/></material>
@@ -8,15 +19,15 @@
   <material name="blue"><color rgba="0.0 0.0 0.8 1"/></material>
   <material name="red"><color rgba="0.8 0.0 0.0 1"/></material>
 
-  <link name="base_footprint"/>
+  <link name="${P}base_footprint"/>
 
   <joint name="base_joint" type="fixed">
-    <parent link="base_footprint"/>
-    <child link="base_link"/>
+    <parent link="${P}base_footprint"/>
+    <child link="${P}base_link"/>
     <origin xyz="0 0 0.15" rpy="0 0 0"/>
   </joint>
 
-  <link name="base_link">
+  <link name="${P}base_link">
     <visual>
       <geometry><box size="0.50 0.34 0.14"/></geometry>
       <material name="silver"/>
@@ -46,19 +57,21 @@
        base 만 끄면 포탑 무게(1.2kg)가 모델 전체를 끌어내려 서서히 가라앉고,
        바닥에 닿는 순간 튕기는데 base 에는 중력이 없어 되돌아오지 못한다.
        → 로봇이 공중으로 날아가 뒤집힌다. 반드시 세 링크 모두 꺼야 한다. -->
-  <gazebo reference="base_link">
+  <gazebo reference="${P}base_link">
     <kinematic>true</kinematic>
     <gravity>false</gravity>
   </gazebo>
-  <gazebo reference="turret_link">
+  <gazebo reference="${P}turret_link">
     <gravity>false</gravity>
   </gazebo>
-  <gazebo reference="gun_link">
+  <gazebo reference="${P}gun_link">
     <gravity>false</gravity>
   </gazebo>
 
-  <xacro:macro name="wheel" params="prefix x_reflect y_reflect">
-    <link name="${prefix}_wheel_link">
+  <!-- 매개변수 이름이 'side' 인 이유: 로봇 구분 접두사 P 와 헷갈리지 않게.
+       예전엔 이 자리도 prefix 였다. -->
+  <xacro:macro name="wheel" params="side x_reflect y_reflect">
+    <link name="${P}${side}_wheel_link">
       <visual>
         <origin xyz="0 0 0" rpy="1.570796 0 0"/>
         <geometry><cylinder radius="0.05" length="0.04"/></geometry>
@@ -66,33 +79,33 @@
       </visual>
     </link>
 
-    <joint name="${prefix}_wheel_joint" type="fixed">
-      <parent link="base_link"/>
-      <child link="${prefix}_wheel_link"/>
+    <joint name="${P}${side}_wheel_joint" type="fixed">
+      <parent link="${P}base_link"/>
+      <child link="${P}${side}_wheel_link"/>
       <origin xyz="${0.20 * x_reflect} ${0.19 * y_reflect} -0.10" rpy="0 0 0"/>
     </joint>
   </xacro:macro>
 
-  <xacro:wheel prefix="front_left" x_reflect="1" y_reflect="1" />
-  <xacro:wheel prefix="front_right" x_reflect="1" y_reflect="-1" />
-  <xacro:wheel prefix="mid_left" x_reflect="0" y_reflect="1" />
-  <xacro:wheel prefix="mid_right" x_reflect="0" y_reflect="-1" />
-  <xacro:wheel prefix="rear_left" x_reflect="-1" y_reflect="1" />
-  <xacro:wheel prefix="rear_right" x_reflect="-1" y_reflect="-1" />
+  <xacro:wheel side="front_left" x_reflect="1" y_reflect="1" />
+  <xacro:wheel side="front_right" x_reflect="1" y_reflect="-1" />
+  <xacro:wheel side="mid_left" x_reflect="0" y_reflect="1" />
+  <xacro:wheel side="mid_right" x_reflect="0" y_reflect="-1" />
+  <xacro:wheel side="rear_left" x_reflect="-1" y_reflect="1" />
+  <xacro:wheel side="rear_right" x_reflect="-1" y_reflect="-1" />
 
-  <link name="laser_frame">
+  <link name="${P}laser_frame">
     <visual>
       <geometry><cylinder radius="0.035" length="0.04"/></geometry>
       <material name="blue"/>
     </visual>
   </link>
   <joint name="laser_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="laser_frame"/>
+    <parent link="${P}base_link"/>
+    <child link="${P}laser_frame"/>
     <origin xyz="0.245 0.0 0.08" rpy="0 0 3.14159265"/>
   </joint>
 
-  <link name="turret_link">
+  <link name="${P}turret_link">
     <visual>
       <geometry><box size="0.06 0.12 0.30"/></geometry>
       <material name="silver"/>
@@ -105,14 +118,14 @@
     </inertial>
   </link>
   <joint name="turret_yaw_joint" type="revolute">
-    <parent link="base_link"/>
-    <child link="turret_link"/>
+    <parent link="${P}base_link"/>
+    <child link="${P}turret_link"/>
     <origin xyz="0 0 0.245" rpy="0 0 0"/>
     <axis xyz="0 0 1"/>
     <limit lower="-6.2832" upper="6.2832" effort="100" velocity="1.0"/>
   </joint>
 
-  <link name="gun_link">
+  <link name="${P}gun_link">
     <visual>
       <origin xyz="0.03 0 -0.02" rpy="0 0 0"/>
       <geometry><box size="0.08 0.08 0.06"/></geometry>
@@ -126,61 +139,64 @@
     </inertial>
   </link>
   <joint name="turret_pitch_joint" type="revolute">
-    <parent link="turret_link"/>
-    <child link="gun_link"/>
+    <parent link="${P}turret_link"/>
+    <child link="${P}gun_link"/>
     <origin xyz="0 0 0.15" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
     <limit lower="-0.52" upper="0.52" effort="100" velocity="1.0"/>
   </joint>
 
-  <link name="camera_link">
+  <link name="${P}camera_link">
     <visual>
       <geometry><box size="0.025 0.09 0.025"/></geometry>
       <material name="red"/>
     </visual>
   </link>
   <joint name="camera_joint" type="fixed">
-    <parent link="gun_link"/>
-    <child link="camera_link"/>
+    <parent link="${P}gun_link"/>
+    <child link="${P}camera_link"/>
     <origin xyz="0.06 0.0 0.01" rpy="0 0 0"/>
   </joint>
 
   <gazebo>
     <plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
-      <topic>/joint_states</topic>
+      <topic>/${P}joint_states</topic>
     </plugin>
 
+    <!-- cmd_vel 과 odom 은 상대 토픽으로 두면 모델 스코프가 아니라 루트로
+         해석된다(실측). 접두사를 안 붙이면 두 로봇이 같은 /cmd_vel 을 받아
+         나란히 움직인다. 반드시 명시한다. -->
     <plugin filename="gz-sim-velocity-control-system" name="gz::sim::systems::VelocityControl">
-      <topic>cmd_vel</topic>
+      <topic>/${P}cmd_vel</topic>
     </plugin>
 
     <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
-      <odom_frame>odom</odom_frame>
-      <robot_base_frame>base_footprint</robot_base_frame>
+      <odom_frame>${P}odom</odom_frame>
+      <robot_base_frame>${P}base_footprint</robot_base_frame>
       <odom_publish_frequency>50</odom_publish_frequency>
-      <odom_topic>odom</odom_topic>
-      <tf_topic>/model/ugv/tf</tf_topic>
+      <odom_topic>/${P}odom</odom_topic>
+      <tf_topic>/model/${P}ugv/tf</tf_topic>
       <publish_tf>false</publish_tf>
     </plugin>
 
     <plugin filename="gz-sim-joint-controller-system" name="gz::sim::systems::JointController">
       <joint_name>turret_yaw_joint</joint_name>
       <use_velocity_commands>true</use_velocity_commands>
-      <topic>/turret_yaw_cmd</topic>
+      <topic>/${P}turret_yaw_cmd</topic>
     </plugin>
     <plugin filename="gz-sim-joint-controller-system" name="gz::sim::systems::JointController">
       <joint_name>turret_pitch_joint</joint_name>
       <use_velocity_commands>true</use_velocity_commands>
-      <topic>/turret_pitch_cmd</topic>
+      <topic>/${P}turret_pitch_cmd</topic>
     </plugin>
   </gazebo>
 
-  <gazebo reference="laser_frame">
+  <gazebo reference="${P}laser_frame">
     <sensor name="lidar" type="gpu_lidar">
       <pose>0 0 0 0 0 0</pose>
-      <topic>/scan</topic>
+      <topic>/${P}scan</topic>
       <update_rate>10</update_rate>
-      <gz_frame_id>laser_frame</gz_frame_id>
+      <gz_frame_id>${P}laser_frame</gz_frame_id>
       <ray>
         <scan>
           <horizontal>
@@ -201,15 +217,15 @@
     </sensor>
   </gazebo>
 
-  <gazebo reference="camera_link">
+  <gazebo reference="${P}camera_link">
     <sensor name="rgbd_camera" type="rgbd_camera">
       <pose>0 0 0 0 0 0</pose>
-      <topic>/camera</topic>
+      <topic>/${P}camera</topic>
       <!-- 포인트클라우드를 Nav2 장애물 입력으로 쓰려면 frame_id 가 TF 에
            있는 이름이어야 한다. 없으면 스코프명(ugv/base_footprint/...)이
            나가고 코스트맵이 변환을 못 해 통째로 버린다.
            (열화상도 같은 이유로 이미 지정돼 있다) -->
-      <gz_frame_id>camera_link</gz_frame_id>
+      <gz_frame_id>${P}camera_link</gz_frame_id>
       <update_rate>15</update_rate>
       <camera>
         <horizontal_fov>1.089</horizontal_fov>
@@ -234,12 +250,12 @@
          화재 blob 위치에서 depth를 그대로 조회해 거리 추정 가능.
        주의: thermal 센서는 ogre2 렌더 엔진에서만 동작 (월드 sensors 플러그인 render_engine=ogre2 필요).
        출력: /thermal/image_raw (16bit mono, 픽셀값 = 온도[K] / linear_resolution). -->
-  <gazebo reference="camera_link">
+  <gazebo reference="${P}camera_link">
     <sensor name="thermal_camera" type="thermal">
       <pose>0 0 0 0 0 0</pose>
-      <topic>/thermal/image_raw</topic>
+      <topic>/${P}thermal/image_raw</topic>
       <update_rate>10</update_rate>
-      <gz_frame_id>camera_link</gz_frame_id>
+      <gz_frame_id>${P}camera_link</gz_frame_id>
       <camera>
         <horizontal_fov>1.089</horizontal_fov>
         <image>

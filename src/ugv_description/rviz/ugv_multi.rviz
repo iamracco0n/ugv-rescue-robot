@@ -1,0 +1,376 @@
+Panels:
+- Class: rviz_common/Displays
+  Help Height: 0
+  Name: Displays
+  Property Tree Widget:
+    Expanded:
+    - /Global Options1
+    - /Fog_of_War1
+    - /Seen_Memory1
+    - /Walls1
+    - /Active_FOV1
+    - /Robot_Trail1
+    - /Nav2_Plan1
+    - /SLAM_Map1
+    - /Global_Costmap1
+    Splitter Ratio: 0.5
+  Tree Height: 700
+- Class: rviz_common/Selection
+  Name: Selection
+- Class: rviz_common/Tool Properties
+  Expanded:
+  - /2D Goal Pose1
+  Name: Tool Properties
+  Splitter Ratio: 0.5
+- Class: rviz_common/Views
+  Expanded:
+  - /Current View1
+  Name: Views
+  Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ''
+  Displays:
+  - Alpha: 0.15
+    Cell Size: 1
+    Class: rviz_default_plugins/Grid
+    Color: 60; 60; 70
+    Enabled: true
+    Name: Grid
+    Reference Frame: <Fixed Frame>
+    Value: true
+  - Alpha: 0.85
+    Class: rviz_default_plugins/Map
+    Color Scheme: map
+    Enabled: true
+    Name: Fog_of_War
+    Topic:
+      Depth: 1
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/coverage_map
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: ugv1 Active_FOV
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/viz/active_fov
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: ugv2 Active_FOV
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/viz/active_fov
+    Value: true
+  - Alpha: 0.7
+    Class: rviz_default_plugins/Map
+    Color Scheme: costmap
+    Enabled: true
+    Name: Fire_Heatmap
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/fire_heatmap
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: ugv1 Fire_Markers
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/fire_markers
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: ugv2 Fire_Markers
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/fire_markers
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: ugv1 Patrol_Route
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/patrol_markers
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: ugv2 Patrol_Route
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/patrol_markers
+    Value: true
+  - Class: rviz_default_plugins/Image
+    Enabled: true
+    Name: ugv1 Detection_Image
+    Max Value: 1
+    Median window: 5
+    Min Value: 0
+    Normalize Range: true
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/detection/image_annotated
+    Value: true
+  - Class: rviz_default_plugins/Image
+    Enabled: true
+    Name: ugv2 Detection_Image
+    Max Value: 1
+    Median window: 5
+    Min Value: 0
+    Normalize Range: true
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/detection/image_annotated
+    Value: true
+  - Class: rviz_default_plugins/Image
+    Enabled: true
+    Name: ugv1 Fire_Image
+    Max Value: 1
+    Median window: 5
+    Min Value: 0
+    Normalize Range: true
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/fire/image_annotated
+    Value: true
+  - Class: rviz_default_plugins/Image
+    Enabled: true
+    Name: ugv2 Fire_Image
+    Max Value: 1
+    Median window: 5
+    Min Value: 0
+    Normalize Range: true
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/fire/image_annotated
+    Value: true
+  - Alpha: 1
+    Class: rviz_default_plugins/RobotModel
+    Description Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/robot_description
+    Enabled: true
+    Name: ugv1 RobotModel
+    Value: true
+    TF Prefix: ''
+  - Alpha: 1
+    Class: rviz_default_plugins/RobotModel
+    Description Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/robot_description
+    Enabled: true
+    Name: ugv2 RobotModel
+    Value: true
+    TF Prefix: ''
+  - Alpha: 1
+    Class: rviz_default_plugins/Path
+    Color: 0; 255; 0
+    Enabled: true
+    Line Style: Lines
+    Line Width: 0.07
+    Name: ugv1 Robot_Trail
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/viz/robot_trail
+    Value: true
+  - Alpha: 1
+    Class: rviz_default_plugins/Path
+    Color: 0; 170; 255
+    Enabled: true
+    Line Style: Lines
+    Line Width: 0.07
+    Name: ugv2 Robot_Trail
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/viz/robot_trail
+    Value: true
+  - Alpha: 1
+    Class: rviz_default_plugins/Path
+    Color: 0; 255; 0
+    Enabled: true
+    Line Style: Lines
+    Line Width: 0.06
+    Name: ugv1 Nav2_Plan
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/plan
+    Value: true
+  - Alpha: 1
+    Class: rviz_default_plugins/Path
+    Color: 0; 170; 255
+    Enabled: true
+    Line Style: Lines
+    Line Width: 0.06
+    Name: ugv2 Nav2_Plan
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/plan
+    Value: true
+  - Class: rviz_default_plugins/Marker
+    Enabled: true
+    Name: ugv1 Turret_Heading
+    Namespaces:
+      turret_heading: true
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/turret_heading
+    Value: true
+  - Class: rviz_default_plugins/Marker
+    Enabled: true
+    Name: ugv2 Turret_Heading
+    Namespaces:
+      turret_heading: true
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/turret_heading
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: ugv1 Patient_Markers
+    Namespaces:
+      patient_sphere: true
+      patient_text: true
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/patient_markers
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: ugv2 Patient_Markers
+    Namespaces:
+      patient_sphere: true
+      patient_text: true
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/patient_markers
+    Value: true
+  - Alpha: 0.2
+    Class: rviz_default_plugins/Map
+    Color Scheme: map
+    Enabled: true
+    Name: SLAM_Map
+    Topic:
+      Depth: 5
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /map
+    Value: true
+  - Alpha: 1
+    Class: rviz_default_plugins/Path
+    Color: 0; 255; 0
+    Enabled: false
+    Line Style: Lines
+    Line Width: 0.04
+    Name: ugv1 Nav2_Local_Path
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv1/local_plan
+    Value: false
+  - Alpha: 1
+    Class: rviz_default_plugins/Path
+    Color: 0; 170; 255
+    Enabled: false
+    Line Style: Lines
+    Line Width: 0.04
+    Name: ugv2 Nav2_Local_Path
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ugv2/local_plan
+    Value: false
+  Enabled: true
+  Global Options:
+    Background Color: 22; 22; 28
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+  - Class: rviz_default_plugins/Interact
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/SetInitialPose
+  - Class: rviz_default_plugins/SetGoal
+    Topic:
+      Value: /goal_pose
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Scale: 20
+      Target Frame: base_link
+      Value: TopDownOrtho (rviz)
+    Saved: null
