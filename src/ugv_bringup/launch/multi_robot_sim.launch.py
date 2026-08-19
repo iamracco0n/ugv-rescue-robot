@@ -101,10 +101,33 @@ def namespaced_nav2_params(src, prefix, out_path):
 #   복도를 따라 앞뒤로 떼면 서로의 진로를 막지 않는다.
 # 구역 분할과 순서를 맞춘다 — 첫 로봇이 앞쪽 구역(서/남)을 맡으므로
 # 스폰도 그쪽에 둔다. 어긋나면 출발하자마자 건물을 가로질러야 한다.
-ROBOTS = [
-    {'name': 'ugv1', 'x': '-6.0', 'y': '0.0'},   # 서쪽 구역
-    {'name': 'ugv2', 'x': '6.0',  'y': '0.0'},   # 동쪽 구역
-]
+# 스폰 자리는 로봇 대수마다 다르다.
+#
+# 구역을 대수만큼 가르므로 각자 자기 구역에서 출발해야 한다. 어긋나면
+# 출발하자마자 건물을 가로질러야 해서 2대를 쓰는 값어치가 준다.
+#
+# 2대 자리(-6/+6)는 유효 100런으로 검증한 구성이라 건드리지 않는다.
+# 3대는 구역이 [-27,-9] [-9,9] [9,27] 로 갈리는데, 각 구역 중심(-18/0/+18)은
+# 복도 잔해와 겹친다 — (-15,1.5) (-19,-2.0) (16,-1.5) (18,2.0). 잔해에서
+# 3m 이상 떨어지면서 자기 구역 안에 드는 -12 / 0 / +12 를 골랐다.
+#
+# 서로 충분히 떼어 놓는 것도 중요하다. 2대를 1.6m 간격으로 나란히 세웠다가
+# 코스트맵 인플레이션(0.55m) 탓에 서로를 장애물로 보고 둘 다 갇힌 적이 있다.
+ROBOT_SETS = {
+    2: [
+        {'name': 'ugv1', 'x': '-6.0', 'y': '0.0'},   # 서쪽 구역
+        {'name': 'ugv2', 'x': '6.0',  'y': '0.0'},   # 동쪽 구역
+    ],
+    # 구역은 목록 '순서' 로 배정된다(bounds_for(idx, total)). 그러니 자리도
+    # 서쪽부터 순서대로 적어야 한다. 이름 순서를 따라 중앙을 ugv3 으로 두면
+    # ugv2 가 동쪽에서 출발해 중앙 구역을 맡게 된다.
+    3: [
+        {'name': 'ugv1', 'x': '-12.0', 'y': '0.0'},  # 서쪽 구역
+        {'name': 'ugv2', 'x': '0.0',   'y': '0.0'},  # 중앙 구역
+        {'name': 'ugv3', 'x': '12.0',  'y': '0.0'},  # 동쪽 구역
+    ],
+}
+ROBOTS = ROBOT_SETS[2]      # 1대 런은 여기서 첫 하나만 쓴다
 
 
 def generate_launch_description():
@@ -207,7 +230,17 @@ def generate_launch_description():
     COMMIT_MAX = float(os.environ.get('UGV_COMMIT_MAX', '240.0'))
     # 같은 머신에서 두 런을 동시에 돌릴 때 임시 파일이 안 겹치게 한다.
     dom = os.environ.get('ROS_DOMAIN_ID', '0')
-    robots = ROBOTS[:max(1, min(n, len(ROBOTS)))]
+    # 대수에 맞는 스폰 자리를 고른다. 없는 대수를 요청하면 조용히 줄이지
+    # 않고 알린다 — 예전에 N=3 을 줘도 말없이 2대로 돌 뻔했고, 그러면 결과를
+    # 3대 성능으로 잘못 읽는다.
+    base = ROBOT_SETS.get(n)
+    if base is None:
+        base = ROBOT_SETS[max(k for k in ROBOT_SETS if k <= max(n, 1))] \
+            if any(k <= max(n, 1) for k in ROBOT_SETS) else ROBOT_SETS[2]
+        if n > len(base):
+            print(f'[multi_robot_sim] 로봇 {n}대를 요청했지만 그 대수의 스폰 '
+                  f'자리가 없어 {len(base)}대로 돕니다')
+    robots = base[:max(1, min(n, len(base)))]
     pkg_bringup = get_package_share_directory('ugv_bringup')
     pkg_desc = get_package_share_directory('ugv_description')
     pkg_nav = get_package_share_directory('ugv_navigation')
