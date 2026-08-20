@@ -13,12 +13,36 @@
 낮았는데, 방을 문으로 나누면 실제로 들어가 봐야 알 수 있다.
 """
 
-W, H = 56.0, 40.0          # 건물 외곽 (m)
+import os
+
+# 맵 크기는 환경변수로 바꾼다. 조난자·화재를 방 기준으로 놓으므로 여기만
+# 바꾸면 큰 맵이 그대로 만들어진다.
+#
+#     UGV_MAP=xl python3 gen_rescue_large.py > rescue_building_xl.sdf
+#
+# 왜 큰 맵이 필요한가: 로봇 대수의 값어치는 맵 크기에 비례한다. 작은 맵
+# (28x20)에서는 1대가 2대보다 나았고, 56x40 에서 2대가 1대를 1.4배 앞섰다.
+# 그런데 3대는 56x40 에서 2대를 못 이긴다(완주 1566·1664초 대 1050~1143초).
+# 복도가 하나뿐이라 로봇끼리 서로 막히고, 방 10개는 3대에게 이미 빽빽하다.
+# 대수를 더 늘려 이득을 보려면 방이 더 많아야 한다.
+_MAP = os.environ.get('UGV_MAP', 'large')
+# SDF 안의 <world name> 은 파일 이름과 같아야 한다.
+#
+# 다르면 로봇이 조용히 안 생긴다. 스폰이 '-world <이름>' 으로 월드를 지정
+# 하는데, 이름이 안 맞아도 create 서비스는 'OK' 를 돌려주고 모델만 안
+# 들어간다. 실제로 XL 맵 첫 시도가 이랬다 — 월드는 뜨고 노드도 다 뜨는데
+# scan·odom 이 한 건도 안 오고 SLAM 맵이 영영 안 왔다.
+WORLD_NAME = 'rescue_building_xl' if _MAP == 'xl' else 'rescue_building_large'
+if _MAP == 'xl':
+    W, H = 84.0, 40.0      # 방 남북 각 8개
+    N_ROOMS = 8
+else:
+    W, H = 56.0, 40.0      # 방 남북 각 5개(검증된 기존 맵)
+    N_ROOMS = 5
 HW, HH = W / 2, H / 2
 WALL_T, WALL_H = 0.25, 2.8
 COR_HALF = 3.0             # 중앙 복도 반폭 → 복도 폭 6m
 DOOR = 1.8                 # 출입구 폭
-N_ROOMS = 5                # 남/북 각 5개 방
 
 out = []
 # 자동 채점용 정답. 배치 함수가 채우고 --truth 로 JSON 저장한다.
@@ -81,6 +105,36 @@ def person(name, uri, x, y, z, roll, pitch, yaw, triage=None):
             {'name': name, 'x': x, 'y': y, 'triage': triage, 'model': uri})
 
 
+def room_xy(idx, side, dx=0.0, depth=0.0):
+    """방 번호와 그 방 안에서의 상대 위치로 월드 좌표를 만든다.
+
+    왜 절대좌표를 쓰면 안 되나
+    --------------------------
+    파일 첫머리에 '치수를 바꾸고 싶으면 상수만 고치고 다시 실행하면 된다'
+    고 적어 뒀지만, 조난자에 대해서는 사실이 아니었다. 좌표가 절대값이라
+    N_ROOMS 를 5 에서 8 로 바꾸면 방 중심이 -21.6 에서 -31.5 로 옮겨 가고,
+    조난자는 엉뚱한 방이나 벽 속에 떨어진다.
+
+    방 번호 기준으로 적으면 맵 크기가 진짜 파라미터가 된다.
+
+      idx    방 번호(0 부터). 서쪽에서 동쪽으로 센다
+      side   'n' 북쪽 / 's' 남쪽
+      dx     그 방 문(=방 중심)에서 동서로 얼마나 떨어졌나[m]. +가 동쪽
+      depth  복도 안쪽 벽에서 얼마나 깊이 들어갔나[m]. 항상 양수
+    """
+    room_w = W / N_ROOMS
+    cx = -HW + room_w * (idx + 0.5)
+    y = (COR_HALF + depth) if side == 'n' else -(COR_HALF + depth)
+    return cx + dx, y
+
+
+def person_in_room(name, uri, idx, side, dx, depth, z, roll, pitch, yaw,
+                   triage=None):
+    """방 기준으로 조난자를 놓는다. 좌표 계산만 room_xy 에 맡긴다."""
+    x, y = room_xy(idx, side, dx, depth)
+    person(name, uri, round(x, 2), round(y, 2), z, roll, pitch, yaw, triage)
+
+
 def fire(name, x, y, z=0.6, sx=0.9, sy=0.9, sz=1.2):
     TRUTH['fires'].append({'name': name, 'x': x, 'y': y})
     add(f'''    <model name="{name}">
@@ -118,7 +172,7 @@ add(f'''<?xml version="1.0" ?>
   총 {N_ROOMS*2}개 방. 각 방은 폭 {DOOR}m 문으로만 복도와 이어진다.
 -->
 <sdf version="1.7">
-  <world name="rescue_building_large">
+  <world name="{WORLD_NAME}">
 
     <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
@@ -189,6 +243,19 @@ debris = [
     (-6, 17, 1.4, 0.8, 1.0, 0.1), (8, -18, 1.1, 1.1, 0.9, -0.35),
     (18, 2.0, 0.7, 0.7, 0.6, 0.0), (-19, -2.0, 0.7, 0.7, 0.6, 0.0),
 ]
+# XL 맵은 방이 6개 더 늘어난다. 잔해 좌표가 절대값이라 그대로 두면 바깥
+# 방들만 깨끗해져서, 넓어진 만큼 오히려 쉬워진다. 난이도가 고르지 않으면
+# 대수 비교가 아니라 '어느 로봇이 쉬운 구역을 맡았나' 비교가 된다.
+# 기존 맵과 비슷한 밀도(방 10개에 20덩이)로 새 구역에도 깔아 준다.
+if _MAP == 'xl':
+    debris += [
+        (-34, 10, 1.3, 0.9, 1.0, 0.2), (-33, -12, 1.1, 1.3, 0.9, -0.3),
+        (-30, 5, 0.8, 0.8, 0.7, 0.1), (31, 12, 1.4, 0.9, 1.1, 0.35),
+        (33, -10, 1.0, 1.5, 0.9, -0.2), (36, 6, 0.9, 0.9, 0.8, 0.0),
+        (24, -17, 1.2, 1.0, 1.0, 0.15), (-28, -17, 1.1, 1.1, 0.9, -0.1),
+        (24, 8, 0.7, 0.7, 0.6, 0.25), (-24, 3, 0.7, 0.7, 0.6, -0.25),
+        (39, -2.0, 0.7, 0.7, 0.6, 0.0), (-39, 2.0, 0.7, 0.7, 0.6, 0.0),
+    ]
 for i, (x, y, sx, sy, sz, yaw) in enumerate(debris, 1):
     box(f'debris_{i}', x, y, sz / 2, sx, sy, sz,
         rgb=(0.42, 0.38, 0.33), yaw=yaw)
@@ -201,11 +268,15 @@ for i, (x, y, sx, sy, sz, yaw) in enumerate(debris, 1):
 # 누운 사람은 메쉬 원점이 발밑이라 몸이 yaw '반대' 방향으로 약 1.75m 뻗는다.
 # 실측으로 확인했다 — 원점(-14,-16)/yaw 0.5 인 조난자의 검출 38건이 평균
 # (-14.77,-16.74) 였다. 배치할 때 그쪽에 벽이 없는지 봐야 한다.
-person('victim_standing_n1', 'Standing%20person', -22.0, 16.0, 0, 0, 0, -1.57, triage=3)
-person('victim_lying_n3',    'Casual%20female',    -1.0, 15.5, 0.15, 0, -1.5708, 2.0, triage=1)
-person('victim_lying_s2',    'Standing%20person', -14.0, -16.0, 0.15, 0, -1.5708, 0.5, triage=1)
+person_in_room('victim_standing_n1', 'Standing%20person', 0, 'n', 0.4, 13.0,
+               0, 0, 0, -1.57, triage=3)
+person_in_room('victim_lying_n3', 'Casual%20female', 2, 'n', -1.0, 12.5,
+               0.15, 0, -1.5708, 2.0, triage=1)
+person_in_room('victim_lying_s2', 'Standing%20person', 1, 's', -2.8, 13.0,
+               0.15, 0, -1.5708, 0.5, triage=1)
 # 앉아있는 사람 — 휠체어 환자. 서있음도 누움도 아닌 애매한 자세.
-person('victim_sitting_n4',  'PatientWheelChair',  12.0, 10.0, 0, 0, 0, 1.2, triage=2)
+person_in_room('victim_sitting_n4', 'PatientWheelChair', 3, 'n', 0.8, 7.0,
+               0, 0, 0, 1.2, triage=2)
 # 원래 병원 이동침대(TrolleyBedPatient)였다. 두 가지 이유로 바닥 누움으로
 # 바꿨다.
 #   · 재난 현장에 환자용 이동침대가 놓여 있는 것이 부자연스럽다
@@ -213,9 +284,11 @@ person('victim_sitting_n4',  'PatientWheelChair',  12.0, 10.0, 0, 0, 0, 1.2, tri
 #     사람 박스를 아예 못 만들었다. 침대 프레임이 몸을 가리고 로봇 카메라
 #     (약 0.5m)가 60cm 침대의 옆면만 보는 탓으로 보인다. 관문을 고쳐도
 #     살릴 수 없는 종류라 시나리오에서 뺐다.
-person('victim_lying_s4',    'Standing%20person',   9.0, -14.0, 0.15, 0, -1.5708, 0.3, triage=1)
+person_in_room('victim_lying_s4', 'Standing%20person', 3, 's', -2.2, 11.0,
+               0.15, 0, -1.5708, 0.3, triage=1)
 # 잔해에 반쯤 가린 사람 — 오탐 게이트와 접근 로직 시험용
-person('victim_occluded_s1', 'Casual%20female',   -23.5, -16.0, 0, 0, 0, 0.9, triage=3)
+person_in_room('victim_occluded_s1', 'Casual%20female', 0, 's', -1.1, 13.0,
+               0, 0, 0, 0.9, triage=3)
 # 복도 동쪽 끝 — 이동 중 먼 거리에서 먼저 보이는 대상.
 # 원래 'Male visitor' 를 썼는데 이 Fuel 자산만 <model> 이 아니라 <actor> 다
 # (걷기 애니메이션 + 자체 trajectory pose 0 1 0). 그래서
@@ -226,7 +299,30 @@ person('victim_occluded_s1', 'Casual%20female',   -23.5, -16.0, 0, 0, 0, 0.9, tr
 #     분류돼 L1 로 나왔다.
 # 걸어다니는 사람은 애초에 구조 대상이 아니므로 나머지 6명과 같은
 # 정적 모델로 통일한다.
-person('victim_corridor_e',  'Standing%20person',  24.0, 0.5, 0, 0, 0, 3.14, triage=3)
+person('victim_corridor_e',  'Standing%20person',  HW - 4.0, 0.5, 0, 0, 0, 3.14,
+       triage=3)
+
+# ── XL 맵 전용 조난자 ─────────────────────────────────────────────────
+# 방이 10개에서 16개로 늘었으므로 조난자도 비례해 늘린다. 안 그러면 방당
+# 밀도가 낮아져 '넓어서 어려운' 것이 아니라 '허탕이 많아서 오래 걸리는'
+# 맵이 된다. 그러면 대수 비교가 아니라 이동 속도 비교가 되어 버린다.
+#
+# 자세 비율은 기존 맵과 같게 맞춘다 — 누움 3 : 서있음 3 : 휠체어 1 을
+# 누움 6 : 서있음 5 : 휠체어 2 로 늘렸다(7명 → 13명).
+# 새로 쓰는 방(4~7번)에 고르게 흩고, 누운 사람은 구석 쪽에 둔다.
+if _MAP == 'xl':
+    person_in_room('victim_lying_n5', 'Standing%20person', 5, 'n', -2.5, 12.0,
+                   0.15, 0, -1.5708, 1.1, triage=1)
+    person_in_room('victim_lying_s6', 'Casual%20female', 6, 's', 2.4, 13.5,
+                   0.15, 0, -1.5708, 2.6, triage=1)
+    person_in_room('victim_lying_n7', 'Standing%20person', 7, 'n', -1.6, 14.0,
+                   0.15, 0, -1.5708, 0.2, triage=1)
+    person_in_room('victim_standing_s5', 'Casual%20female', 5, 's', 1.8, 8.0,
+                   0, 0, 0, 2.2, triage=3)
+    person_in_room('victim_standing_n6', 'Standing%20person', 6, 'n', -0.9, 9.5,
+                   0, 0, 0, -0.8, triage=3)
+    person_in_room('victim_sitting_s7', 'PatientWheelChair', 7, 's', 1.4, 6.5,
+                   0, 0, 0, 2.9, triage=2)
 
 # 가린 사람 바로 앞 잔해
 box('debris_occluder', -22.6, -15.4, 0.55, 1.2, 0.9, 1.1,
