@@ -32,8 +32,13 @@ _MAP = os.environ.get('UGV_MAP', 'large')
 # 하는데, 이름이 안 맞아도 create 서비스는 'OK' 를 돌려주고 모델만 안
 # 들어간다. 실제로 XL 맵 첫 시도가 이랬다 — 월드는 뜨고 노드도 다 뜨는데
 # scan·odom 이 한 건도 안 오고 SLAM 맵이 영영 안 왔다.
-WORLD_NAME = 'rescue_building_xl' if _MAP == 'xl' else 'rescue_building_large'
-if _MAP == 'xl':
+WORLD_NAME = ('rescue_building_xxl' if _MAP == 'xxl'
+              else 'rescue_building_xl' if _MAP == 'xl'
+              else 'rescue_building_large')
+if _MAP == 'xxl':
+    W, H = 168.0, 40.0     # 방 남북 각 16개
+    N_ROOMS = 16
+elif _MAP == 'xl':
     W, H = 84.0, 40.0      # 방 남북 각 8개
     N_ROOMS = 8
 else:
@@ -247,6 +252,20 @@ debris = [
 # 방들만 깨끗해져서, 넓어진 만큼 오히려 쉬워진다. 난이도가 고르지 않으면
 # 대수 비교가 아니라 '어느 로봇이 쉬운 구역을 맡았나' 비교가 된다.
 # 기존 맵과 비슷한 밀도(방 10개에 20덩이)로 새 구역에도 깔아 준다.
+if _MAP == 'xxl':
+    # 방이 32개다. 기존 잔해는 가운데 56m 에만 있어서 그대로 두면 바깥
+    # 방들이 통째로 깨끗해진다. 밀도를 맞춰 넓게 깐다.
+    #
+    # (25,17) 은 XXL 에서 조난자와 겹쳐 비켜 놓는다. 겹치면 SDF 는 멀쩡히
+    # 생성되고 시뮬도 뜨지만 '영원히 못 찾는 조난자' 로만 보인다.
+    debris = [d for d in debris if not (d[0] == 25 and d[1] == 17)]
+    debris += [(21, 17, 1.2, 1.2, 0.9, 0.2)]
+    for _bx in (-76, -66, -56, -46, 46, 56, 66, 76):
+        debris += [
+            (_bx, 11, 1.3, 0.9, 1.0, 0.2),
+            (_bx + 4, -12, 1.1, 1.3, 0.9, -0.3),
+            (_bx - 3, 4.5, 0.8, 0.8, 0.7, 0.1),
+        ]
 if _MAP == 'xl':
     debris += [
         (-34, 10, 1.3, 0.9, 1.0, 0.2), (-33, -12, 1.1, 1.3, 0.9, -0.3),
@@ -323,6 +342,44 @@ if _MAP == 'xl':
                    0, 0, 0, -0.8, triage=3)
     person_in_room('victim_sitting_s7', 'PatientWheelChair', 7, 's', 1.4, 6.5,
                    0, 0, 0, 2.9, triage=2)
+
+# ── XXL 맵 전용 조난자 ─────────────────────────────────────────────────
+# 방이 32개라 손으로 적을 수 없다. 방을 돌며 규칙적으로 놓는다.
+#
+# 자세 비율은 기존 맵과 같게 유지한다(누움 6 : 서있음 5 : 휠체어 2).
+# 방마다 다른 자리에 놓아야 '한 자리만 어렵다' 같은 편향이 안 생기므로,
+# 방 번호로 오프셋을 돌린다. 난수를 쓰면 실행마다 맵이 달라져서 런끼리
+# 비교가 안 되므로 절대 쓰지 않는다.
+#
+# 밀도는 XL 과 맞춘다 — XL 은 방 16개에 13명(0.81명/방)이었다.
+# XXL 은 방 32개이므로 26명이다.
+if _MAP == 'xxl':
+    _POSES = (['lying'] * 6 + ['standing'] * 5 + ['sitting'] * 2)
+    _DX = (-2.8, 1.6, -1.1, 2.4, -2.2, 0.8, -0.4, 1.9)
+    _DEPTH = (13.0, 8.5, 11.5, 6.5, 14.0, 9.5, 12.5, 7.5)
+    _k = 0
+    for _idx in range(N_ROOMS):
+        for _side in ('n', 's'):
+            # 방 32개에 26명이므로 6개 방은 비운다. 6칸마다 하나씩 건너뛰어
+            # 빈 방이 한쪽에 몰리지 않게 한다.
+            if _k % 6 == 5 and _k >= 5:
+                _k += 1
+                continue
+            _pose = _POSES[_k % len(_POSES)]
+            _dx = _DX[_k % len(_DX)]
+            _depth = _DEPTH[_k % len(_DEPTH)]
+            _yaw = round(0.3 + 0.37 * _k, 2) % 6.28
+            _name = f'victim_{_pose}_{_side}{_idx}'
+            if _pose == 'lying':
+                person_in_room(_name, 'Standing%20person', _idx, _side,
+                               _dx, _depth, 0.15, 0, -1.5708, _yaw, triage=1)
+            elif _pose == 'sitting':
+                person_in_room(_name, 'PatientWheelChair', _idx, _side,
+                               _dx, _depth, 0, 0, 0, _yaw, triage=2)
+            else:
+                person_in_room(_name, 'Casual%20female', _idx, _side,
+                               _dx, _depth, 0, 0, 0, _yaw, triage=3)
+            _k += 1
 
 # 가린 사람 바로 앞 잔해
 box('debris_occluder', -22.6, -15.4, 0.55, 1.2, 0.9, 1.1,

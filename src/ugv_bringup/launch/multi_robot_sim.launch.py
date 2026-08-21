@@ -113,21 +113,46 @@ def namespaced_nav2_params(src, prefix, out_path):
 #
 # 서로 충분히 떼어 놓는 것도 중요하다. 2대를 1.6m 간격으로 나란히 세웠다가
 # 코스트맵 인플레이션(0.55m) 탓에 서로를 장애물로 보고 둘 다 갇힌 적이 있다.
-ROBOT_SETS = {
-    2: [
-        {'name': 'ugv1', 'x': '-6.0', 'y': '0.0'},   # 서쪽 구역
-        {'name': 'ugv2', 'x': '6.0',  'y': '0.0'},   # 동쪽 구역
-    ],
-    # 구역은 목록 '순서' 로 배정된다(bounds_for(idx, total)). 그러니 자리도
-    # 서쪽부터 순서대로 적어야 한다. 이름 순서를 따라 중앙을 ugv3 으로 두면
-    # ugv2 가 동쪽에서 출발해 중앙 구역을 맡게 된다.
-    3: [
-        {'name': 'ugv1', 'x': '-12.0', 'y': '0.0'},  # 서쪽 구역
-        {'name': 'ugv2', 'x': '0.0',   'y': '0.0'},  # 중앙 구역
-        {'name': 'ugv3', 'x': '12.0',  'y': '0.0'},  # 동쪽 구역
-    ],
-}
-ROBOTS = ROBOT_SETS[2]      # 1대 런은 여기서 첫 하나만 쓴다
+def spawn_points(n, x0, x1, keep_two=True):
+    """대수와 탐사 경계로 스폰 자리를 만든다.
+
+    왜 좌표를 박아두면 안 되나
+    --------------------------
+    구역은 경계를 대수로 나눠 순서대로 배정된다(bounds_for). 그러니 스폰도
+    같은 규칙으로 나와야 각자 자기 구역에서 출발한다. 좌표를 박아 두면 맵이
+    바뀔 때마다 어긋난다.
+
+    실제로 어긋났다. 84x40 맵(경계 +-41)에서 3대를 돌렸는데 스폰이
+    -12/0/+12 로 박혀 있어, 1번과 3번이 담당 구역 밖에서 출발했다. 출발
+    직후 자기 구역까지 건너가야 하니 3대가 손해를 봤고, '3대가 2대를 못
+    이긴다' 는 결과가 이것 때문일 수 있다. 테스트도 못 잡았다 — 56x40
+    경계(+-27)로만 검사해서 통과했다.
+
+    2대 자리는 유효 100런으로 검증한 구성이라 그대로 둔다(keep_two).
+    검증한 수치와의 연속성이 깨지면 안 된다.
+    """
+    if n == 2 and keep_two and abs(x0 + 27.0) < 1e-6 and abs(x1 - 27.0) < 1e-6:
+        return [{'name': 'ugv1', 'x': '-6.0', 'y': '0.0'},
+                {'name': 'ugv2', 'x': '6.0', 'y': '0.0'}]
+    w = (x1 - x0) / max(n, 1)
+    out = []
+    for i in range(n):
+        cx = x0 + w * (i + 0.5)
+        # 복도 잔해를 피한다. 잔해는 |y|<3 구간에 몇 개 있고 폭이 1m 안팎
+        # 이라, 1.5m 옆으로 비키면 충분하다.
+        for dodge in (0.0, 2.8, -2.8, 4.5, -4.5, 6.0, -6.0):
+            cand = cx + dodge
+            if not (x0 + 1.0 <= cand <= x1 - 1.0):
+                continue          # 구역 밖으로 나가면 안 된다
+            if all(abs(cand - bx) > 2.5
+                   for bx in (-15, -19, 16, 18, -39, 39)):
+                cx = cand
+                break
+        out.append({'name': f'ugv{i + 1}', 'x': f'{cx:.1f}', 'y': '0.0'})
+    return out
+
+
+ROBOTS = spawn_points(2, -27.0, 27.0)   # 1대 런은 여기서 첫 하나만 쓴다
 
 
 def generate_launch_description():
@@ -233,14 +258,8 @@ def generate_launch_description():
     # 대수에 맞는 스폰 자리를 고른다. 없는 대수를 요청하면 조용히 줄이지
     # 않고 알린다 — 예전에 N=3 을 줘도 말없이 2대로 돌 뻔했고, 그러면 결과를
     # 3대 성능으로 잘못 읽는다.
-    base = ROBOT_SETS.get(n)
-    if base is None:
-        base = ROBOT_SETS[max(k for k in ROBOT_SETS if k <= max(n, 1))] \
-            if any(k <= max(n, 1) for k in ROBOT_SETS) else ROBOT_SETS[2]
-        if n > len(base):
-            print(f'[multi_robot_sim] 로봇 {n}대를 요청했지만 그 대수의 스폰 '
-                  f'자리가 없어 {len(base)}대로 돕니다')
-    robots = base[:max(1, min(n, len(base)))]
+    # 스폰은 탐사 경계에서 계산한다 — 각자 자기 구역에서 출발해야 한다.
+    robots = spawn_points(max(1, n), x0, x1)
     pkg_bringup = get_package_share_directory('ugv_bringup')
     pkg_desc = get_package_share_directory('ugv_description')
     pkg_nav = get_package_share_directory('ugv_navigation')

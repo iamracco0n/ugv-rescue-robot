@@ -36,7 +36,9 @@ def gen(map_name):
     env = dict(os.environ, UGV_MAP=map_name)
     out = subprocess.run([sys.executable, GEN], capture_output=True,
                          text=True, env=env, check=True).stdout
-    W, H, N = (84.0, 40.0, 8) if map_name == 'xl' else (56.0, 40.0, 5)
+    SIZES = {'xxl': (168.0, 40.0, 16), 'xl': (84.0, 40.0, 8),
+             'large': (56.0, 40.0, 5)}
+    W, H, N = SIZES.get(map_name, SIZES['large'])
     victims, debris = [], []
     for m in re.finditer(
             r'<name>(victim_[^<]+)</name>.*?<pose>(-?[\d.]+) (-?[\d.]+)',
