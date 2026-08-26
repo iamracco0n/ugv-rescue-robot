@@ -78,6 +78,12 @@ def main(truth_path, paths):
     print('-' * (10 + 8 * len(MARKS)))
     line = ''.join(f'{med([r[i] for r in rows]):>8}' for i in range(len(MARKS)))
     print(f'{"중앙값":<10}{line}')
+    # 평균도 같이 낸다. 인원수는 0~13 의 정수라 중앙값만 보면 한 명 차이가
+    # 통째로 묻힌다 — 실제로 2대와 3대의 중앙값이 네 시점 모두 같게 나왔는데,
+    # 그게 '정말 같다' 인지 '반올림에 가렸다' 인지 중앙값만으로는 못 가른다.
+    line = ''.join(f'{sum(r[i] for r in rows) / len(rows):>8.1f}'
+                   for i in range(len(MARKS)))
+    print(f'{"평균":<10}{line}')
 
 
 if __name__ == '__main__':
