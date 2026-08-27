@@ -8,6 +8,7 @@
 
 ## 목차
 
+0. [**현재 기동 구성**](#현재-기동-구성) — 어떤 노드가 실제로 도는지
 1. [프로젝트 개요](#1-프로젝트-개요)
 2. [하드웨어 사양](#2-하드웨어-사양)
 3. [워크스페이스 구조](#3-워크스페이스-구조)
@@ -21,6 +22,26 @@
 11. [빌드 및 실행](#11-빌드-및-실행)
 12. [런타임 조작 명령](#12-런타임-조작-명령)
 13. [알려진 이슈 및 해결 이력](#13-알려진-이슈-및-해결-이력)
+
+---
+
+## 현재 기동 구성
+
+`patrol_sim.launch.py` · `multi_robot_sim.launch.py` 가 실제로 띄우는 노드다.
+아래 표가 이 문서에서 가장 먼저 볼 곳이다.
+
+| 노드 | 역할 | 상세 |
+|---|---|---|
+| `patrol_navigator.py` | 프론티어 + 커버리지 통합 탐사 (탐사 두뇌) | [6.6](#66-patrolnavigator-patrol_navigatorpy--현재-탐사-두뇌) |
+| `target_manager_node.py` | 포탑 조준 · 정지·조준 확인 등록 | [6.2](#62-targetmanager-target_manager_nodepy) |
+| `yolo_pose_node.py` | 조난자 탐지 · 자세 판정 · 트리아지 | [6.3](#63-yoloposenode-yolo_pose_nodepy) |
+| `visibility_overlay_node.py` | 커버리지 격자 · NBV 시선 시각화 | [6.7](#67-visibilityoverlay-visibility_overlay_nodepy) |
+| `fire_detection_node.py` | 열화상 화재 감지 · 회피 마킹 | [6.8](#68-firedetection-fire_detection_nodepy) |
+| `map_merge_node.py` · `tf_relay_node.py` | 다중 로봇 전용 — 지도 병합 · TF 중계 | [6.9](#69-mapmerge--tfrelay--다중-로봇-전용) |
+| `odometry_node.py` | 휠 오도메트리 (실로봇 전용) | [6.4](#64-odometrynode-odometry_nodepy--실로봇-전용) |
+
+> **6.1 의 `vision_coverage_navigator` 는 현재 기동하지 않는다.** 초기 설계
+> 기록으로 남겨 둔 것이고, 지금 탐사를 맡는 노드는 6.6 이다.
 
 ---
 
@@ -310,7 +331,10 @@ SLAM OccupancyGrid (/map)      VisualCoverageGrid (/visual_coverage)
 
 ## 6. 노드별 상세 스펙
 
-### 6.1 VisionCoverageNavigator (`vision_coverage_navigator.py`)
+### 6.1 VisionCoverageNavigator (`vision_coverage_navigator.py`) — 은퇴
+
+> 현재 기동하지 않는다. 초기 설계 기록이다. 지금 탐사를 맡는 노드는
+> [6.6 PatrolNavigator](#66-patrolnavigator-patrol_navigatorpy--현재-탐사-두뇌) 다.
 
 **역할:** 자율 탐색 주 노드. 슬라이싱 더 파이 기반 시야 확보 기동.
 
@@ -687,6 +711,104 @@ M_PER_TICK        = 2π × 0.042 / 3960 ≈ 0.0000666 m/tick
 
 ---
 
+### 6.6 PatrolNavigator (`patrol_navigator.py`) — 현재 탐사 두뇌
+
+2,323줄. 프론티어(라이다 미탐사 경계)와 시각 커버리지(카메라 미관측 영역)를
+한 점수식으로 합쳐 다음 목표를 고른다. 두 후보의 단위가 다르므로(경계선 길이
+대 면적) 둘 다 '새로 얻을 넓이 m²' 로 환산해서 비교한다.
+
+| 방향 | 토픽 | 형 |
+|---|---|---|
+| 발행 | `goal_pose` | `PoseStamped` — Nav2 목표 |
+| 발행 | `cmd_vel` | `Twist` — 박힘 탈출 등 직접 제어 |
+| 발행 | `coverage_map` | `OccupancyGrid` — 전장의 안개 |
+| 발행 | `seen_grid` | `OccupancyGrid` — 원본 관측 격자 |
+| 발행 | `patrol_markers` | `MarkerArray` |
+| 발행 | `apex_aim_point` | `Point` — 포탑 조준 요청 |
+| 발행 | `explore_claim` | `PoseStamped` — **다중 로봇 목표 선점** |
+| 발행 | `sweep_complete` | `Bool` |
+| 구독 | `map` · `odom` · `joint_states` | SLAM · 주행 · 포탑 각도 |
+| 구독 | `patient_markers` · `inspect_request` · `inspect_done` | 조난자 조사 연동 |
+| 구독 | `fire_candidate` · `fire_alert` · `fire_inspect_done` | 화재 조사 연동 |
+| 구독 | `patrol_enable` | `Bool` — 순찰 on/off |
+
+주요 파라미터
+
+| 이름 | 기본 | 뜻 |
+|---|---|---|
+| `patrol_mode` | `explore` | 탐사 모드(웨이포인트 순찰도 가능) |
+| `frontier_min_size` | `6` | 이보다 작은 경계 덩어리는 무시 |
+| `frontier_replan_s` | `6.0` | 목표 재선택 주기(초) |
+| `frontier_standoff` | `0.7` | 목표를 벽에서 띄우는 거리(m) |
+| `reach_dist` | `0.6` | 도착 판정 반경(m) |
+| `inspect_timeout` | `30.0` | 조사 한 건에 쓸 최대 시간(초) |
+| `wp_timeout` | `45.0` | 웨이포인트 모드 제한시간(초) |
+| `fire_dedup_dist` | `1.5` | 같은 화재로 묶을 거리(m) |
+
+목표 제한시간은 고정이 아니라 **거리에 비례**한다(`15초 + 거리/0.25`). 고정으로
+두면 맵이 커질 때 먼 목표가 100 % 실패한다.
+
+### 6.7 VisibilityOverlay (`visibility_overlay_node.py`)
+
+609줄. 커버리지 상태를 RViz 로 내보내는 시각화 계층이다. 주행 판단에는
+관여하지 않는다.
+
+| 방향 | 토픽 | 뜻 |
+|---|---|---|
+| 발행 | `/viz/seen_persistent` | 누적 관측 격자 |
+| 발행 | `/viz/seen_recent` | 최근 관측 격자 |
+| 발행 | `/viz/walls` | 벽 추정 |
+| 발행 | `/viz/active_fov` | 현재 화각 |
+| 발행 | `/viz/blind_corners` | 사각지대 후보 |
+| 발행 | `/viz/robot_trail` | 이동 궤적 |
+| 구독 | `/map` · `/odom` · `/joint_states` | |
+
+### 6.8 FireDetection (`fire_detection_node.py`)
+
+753줄. 열화상 blob 을 깊이로 거리 추정해 월드에 투영하고, Nav2 코스트맵에
+마킹해 **경로 자체가 화재를 피하게** 한다.
+
+| 방향 | 토픽 | 뜻 |
+|---|---|---|
+| 발행 | `fire_candidate` | 조사 요청(탐사 노드가 받는다) |
+| 발행 | `fire_alert` | 확정 화재 |
+| 발행 | `fire_heatmap` | `OccupancyGrid` |
+| 발행 | `fire_markers` | `MarkerArray` |
+| 발행 | `fire/image_annotated` | 오버레이 영상 |
+| 발행 | `fire_inspect_done` | 조사 종료 신호 |
+| 구독 | `thermal/image_raw` · `camera/camera/color/image_raw` | 열화상 · RGB |
+| 구독 | `map` · `odom` · `joint_states` | |
+
+주요 파라미터
+
+| 이름 | 기본 | 뜻 |
+|---|---|---|
+| `fire_temp_threshold_k` | `380.0` | 화재 판정 온도(K) |
+| `min_blob_area` | `25` | 이보다 작은 blob 무시(px) |
+| `cam_fov_rad` | `1.089` | 수평 화각 |
+| `max_fire_range` · `min_fire_range` | `7.5` · `0.3` | 유효 거리(m) |
+| `depth_max_valid` | `7.8` | 깊이 유효 상한(m) |
+
+거리 추정에는 blob 의 **모든 픽셀**을 쓴다. 가장자리만 쓰면 뒤쪽 벽 깊이가
+섞여 화재가 벽으로 튄다.
+
+### 6.9 MapMerge · TfRelay — 다중 로봇 전용
+
+`map_merge_node.py`(153줄)는 로봇별 SLAM 격자를 합쳐 공용 `/map` 으로 낸다.
+
+| 파라미터 | 기본 | 뜻 |
+|---|---|---|
+| `robots` | `['ugv1', 'ugv2']` | 합칠 로봇 이름공간 |
+| `offset_x` · `offset_y` | `[0.0, 0.0]` | 로봇별 격자 오프셋 |
+| `publish_period_s` | `2.0` | 병합 발행 주기(초) |
+
+`tf_relay_node.py`(59줄)는 로봇별 `/ugv1/tf` 를 전역 `/tf` 로 그대로 옮긴다.
+**시각화 전용**이다 — Nav2 와 SLAM 은 같은 이름공간 안에서 도니 문제가 없는데,
+RViz 만 전역 `/tf` 를 보기 때문에 로봇 본체도 경로선도 화면에 안 나온다.
+프레임 이름이 이미 로봇별로 갈려 있어(`ugv1/base_link`) 한 트리에 합쳐도
+안 겹친다. 계산은 하지 않으므로 부하가 문제면 이 노드만 꺼도 된다.
+
+
 ## 7. 커스텀 메시지 정의
 
 ### ugv_msgs/TargetDetection.msg
@@ -1012,4 +1134,5 @@ aim = apex + 0.5m × normalize(apex - robot)  # apex 너머 0.5m 지점
 
 ---
 
-*이 문서는 ugv_ws 프로젝트의 전체 아키텍처, 알고리즘, 인터페이스를 다른 AI 또는 개발자가 완전히 이해할 수 있도록 작성되었습니다.*
+*이 문서는 ugv_ws 의 노드 · 알고리즘 · 인터페이스 전체를 다룬다. 실측 결과는*
+*[README](README.md), 실험 기록은 [docs/PR_multi_robot.md](docs/PR_multi_robot.md) 에 있다.*

@@ -5,7 +5,25 @@ A.R.G.U.S. UGV 워크스페이스를 데스크탑에서 처음부터 세팅하�
 
 Step 1부터 순서대로 실행하면 됩니다. 프로젝트 개요는 [README](README.md),
 실행 방법은 [HOW_TO_RUN.md](HOW_TO_RUN.md),
-구조·알고리즘 상세는 [ARCHITECTURE.md](ARCHITECTURE.md)를 참고하세요.
+구조·알고리즘 상세는 [ARCHITECTURE.md](ARCHITECTURE.md) 를 참고한다.
+
+---
+
+## 목차
+
+**[워크스페이스 구조](#워크스페이스-구조)** ·
+**[Jetson → 데스크탑 차이점](#jetson--데스크탑-주요-차이점)** ·
+**[Step 1. ROS 2 확인](#step-1-ros2-humble-기본-확인)** ·
+**[2. 시스템 의존성](#step-2-시스템-의존성-설치)** ·
+**[3. Gazebo](#step-3-gazebo-설치-harmonic-권장)** ·
+**[4. Nav2 + SLAM](#step-4-nav2--slam-설치)** ·
+**[5. Python 패키지](#step-5-python-패키지-설치)** ·
+**[6. rosdep](#step-6-rosdep-초기화-및-의존성-설치)** ·
+**[7. 빌드](#step-7-워크스페이스-빌드)** ·
+**[8. bashrc](#step-8-bashrc-설정)** ·
+**[9. 실행](#step-9-gazebo-시뮬레이션-실행)** ·
+**[Gazebo 버전별 주의](#gazebo-버전별-주의사항)** ·
+**[트러블슈팅](#트러블슈팅)**
 
 ---
 
@@ -67,8 +85,8 @@ sudo apt install -y \
 
 ## Step 3. Gazebo 설치 (Harmonic 권장)
 
-> **이 저장소는 Gazebo Harmonic(gz-sim8) 기준으로 동작 검증되어 있습니다.**
-> Harmonic이면 아래 블록 대신 이렇게 설치하세요:
+> **이 저장소는 Gazebo Harmonic(gz-sim8) 기준으로 동작 검증돼 있다.**
+> Harmonic 이면 아래 블록 대신 이렇게 설치한다:
 >
 > ```bash
 > sudo apt install -y gz-harmonic
@@ -79,7 +97,7 @@ sudo apt install -y \
 >   ros-humble-ros-gzharmonic-interfaces
 > ```
 >
-> Garden(gz-sim7)으로 되돌릴 경우 URDF 수정이 필요합니다 —
+> Garden(gz-sim7)으로 되돌릴 경우 URDF 수정이 필요하다 —
 > [Gazebo 버전별 주의사항](#gazebo-버전별-주의사항) 참조.
 
 ```bash
@@ -125,8 +143,8 @@ sudo apt install -y \
 
 ## Step 5. Python 패키지 설치
 
-**PyTorch는 반드시 따로 설치하세요.** `--index-url`을 한 명령에 같이 걸면 그 인덱스에
-없는 `ultralytics` 등을 못 찾아 설치가 실패합니다.
+**PyTorch 는 반드시 따로 설치한다.** `--index-url` 을 한 명령에 같이 걸면 그 인덱스에
+없는 `ultralytics` 등을 못 찾아 설치가 실패한다.
 
 ```bash
 # ① PyTorch — NVIDIA GPU가 있으면 CUDA 빌드로 (권장)
@@ -162,8 +180,8 @@ pip3 install --user \
 > | CPU 빌드 | 104.5 ms/frame | 9.6 FPS — 카메라 15Hz를 못 따라감 |
 > | CUDA 빌드 | 9.2 ms/frame | 108.9 FPS |
 >
-> `scikit-learn`은 트리아지 모델(`triage_model_rf_robust.pkl`) 로드에 필요합니다.
-> 없으면 `ModuleNotFoundError: sklearn`으로 노드가 즉시 죽습니다.
+> `scikit-learn` 은 트리아지 모델(`triage_model_rf_robust.pkl`) 로드에 필요하다.
+> 없으면 `ModuleNotFoundError: sklearn` 으로 노드가 즉시 죽는다.
 
 ---
 
@@ -192,7 +210,7 @@ colcon build --symlink-install \
 ```
 
 > `micro_ros_setup`, `uros`, `sllidar_ros2`는 실제 하드웨어 전용 패키지라
-> 데스크탑 시뮬에서는 빌드하지 않습니다.
+> 데스크탑 시뮬에서는 빌드하지 않는다.
 
 ---
 
@@ -250,23 +268,23 @@ Garden(gz-sim7)과 Harmonic(gz-sim8)은 **URDF 안의 플러그인/센서 표기
 
 - **SLAM/Nav2에서 TF 조회 실패, `/scan`의 frame_id가 `ugv/base_footprint/lidar` 같은 스코프명**
   → frame_id 엘리먼트명이 버전과 안 맞는 것. Harmonic이 읽는 이름은 `gz_frame_id`이며
-  다음으로 확인할 수 있습니다:
+  다음으로 확인한다:
   ```bash
   strings /usr/lib/x86_64-linux-gnu/libgz-sensors8.so.8 | grep frame_id
   ```
 
 - **로봇 스폰 직후 시뮬이 멈춘 것처럼 보이고 RTF가 0.001까지 떨어짐**
   → **정상입니다.** ogre2 셰이더 최초 컴파일 구간이며 잠시 후 RTF 1.0으로 회복됩니다.
-  이 구간에는 `gz service .../control` 호출도 타임아웃 나서 데드락으로 오진하기 쉽습니다.
+  이 구간에는 `gz service .../control` 호출도 타임아웃 나서 데드락으로 오진하기 쉽다.
 
 - **URDF를 고쳤는데 반영이 안 된 것처럼 보임**
   → gz 서버가 두 개 이상 떠 있으면 ROS 브리지가 옛 서버 토픽을 뭅니다.
-  검증 전에 인스턴스가 하나인지 확인하세요:
+  검증 전에 인스턴스가 하나인지 확인한다:
   ```bash
   pgrep -af "gz sim"
   ```
   정리할 때 `pkill -f "ros2 launch ugv_bringup"` 류는 **자기 셸의 cmdline까지 매칭해
-  스스로 죽으므로** PID로 kill 하세요.
+  스스로 죽으므로** PID 로 kill 한다.
 
 ---
 
@@ -288,7 +306,7 @@ colcon build --packages-select ugv_description ugv_bringup ugv_navigation ugv_te
 ```
 
 ### YOLO 모델 파일 없음
-`yolov8n.pt`, `yolov8n-pose.pt` 파일이 필요합니다:
+`yolov8n.pt` · `yolov8n-pose.pt` 파일이 필요하다:
 ```bash
 pip3 install ultralytics
 python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"  # 자동 다운로드
