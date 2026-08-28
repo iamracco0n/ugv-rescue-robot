@@ -237,6 +237,12 @@ def generate_launch_description():
     # 카메라가 물리적으로 못 보는 띠를 '봤음' 으로 칠하면, 거기 누운 사람은
     # 영원히 못 찾는다(이미 봤다고 표시돼 다시 안 감).
     CAM_MIN = float(os.environ.get('UGV_CAM_MIN', '0.3'))
+    # 뜨자마자 탐사를 시작할지. 기본은 시작(기존 동작).
+    #
+    # 0 을 주면 로봇이 출발선에 선 채로 대기한다. 시연을 녹화할 때 필요하다 —
+    # 스택 기동에 약 1분이 걸리는데 그동안 로봇이 이미 움직여 버리면 출발
+    # 장면을 못 찍는다. 시작은 `/<로봇>/patrol_enable` 에 true 를 쏘면 된다.
+    PATROL_ON_BOOT = os.environ.get('UGV_PATROL_ON_BOOT', '1') != '0'
     # 이 거리 안에서만 '봤음' 으로 친다. 4.5 가 기존 동작.
     #
     # 줄이면 탐사가 더 바싹 붙어야 그 칸을 봤다고 인정한다. 느려지는 대신
@@ -477,6 +483,7 @@ def generate_launch_description():
                               # 잡혀 완료 판정이 영영 안 섰다(경계 217셀).
                               # 내 구역(먼저 훑는 곳)
                               'seen_min_dirs': SEEN_DIRS,
+                              'patrol_enabled_on_boot': PATROL_ON_BOOT,
                               'room_bonus': ROOM_BONUS,
                               'cam_see_min': CAM_MIN,
                               'cam_see_range': CAM_RANGE,
