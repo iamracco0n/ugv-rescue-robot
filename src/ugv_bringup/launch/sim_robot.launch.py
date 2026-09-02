@@ -32,6 +32,12 @@ def _robot(context, *args, **kwargs):
     x      = LaunchConfiguration('x').perform(context)
     y      = LaunchConfiguration('y').perform(context)
     delay  = float(LaunchConfiguration('delay').perform(context))
+    # 로봇을 월드에 새로 넣을지. false 면 이미 들어 있는 것을 쓴다.
+    #
+    # 가제보를 안 내리고 런만 갈아끼울 때 필요하다. 같은 이름이 이미 있으면
+    # create 가 실패하고, 그렇다고 remove 로 지우면 Ogre2 가 머티리얼 해제에서
+    # assert 로 죽는다(HlmsDatablock 소멸자). 아예 안 건드리는 게 답이다.
+    spawn  = LaunchConfiguration('spawn').perform(context).lower() != 'false'
 
     pkg_desc = get_package_share_directory('ugv_description')
     xacro_file = os.path.join(pkg_desc, 'urdf', 'ugv.urdf.xacro')
@@ -94,11 +100,11 @@ def _robot(context, *args, **kwargs):
             }],
             output='screen'),
 
-        TimerAction(period=delay, actions=[
+        *([TimerAction(period=delay, actions=[
             Node(package='ros_gz_sim', executable='create',
                  arguments=['-world', world, '-topic', desc_topic,
                             '-name', name, '-x', x, '-y', y, '-z', '0.15'],
-                 output='screen')]),
+                 output='screen')])] if spawn else []),
 
         Node(package='ros_gz_bridge', executable='parameter_bridge',
              arguments=bridge_args, remappings=remaps,
@@ -115,5 +121,6 @@ def generate_launch_description():
         DeclareLaunchArgument('y',      default_value='0.0'),
         DeclareLaunchArgument('delay',  default_value='8.0'),
         DeclareLaunchArgument('bridge_clock', default_value='true'),
+        DeclareLaunchArgument('spawn', default_value='true'),
         OpaqueFunction(function=_robot),
     ])

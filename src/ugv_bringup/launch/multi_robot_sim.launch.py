@@ -31,7 +31,7 @@ from launch_ros.actions import PushRosNamespace
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (LaunchConfiguration, PathJoinSubstitution,
-                                  TextSubstitution)
+                                  PythonExpression, TextSubstitution)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -286,17 +286,38 @@ def generate_launch_description():
         # 대수를 줄여 돌릴 수 있게 한다. 1 로 두면 네임스페이스 구성 자체가
         # 멀쩡한지(로봇끼리 간섭과 무관하게) 가릴 수 있다.
         DeclareLaunchArgument('n_robots', default_value='2'),
+        # 가제보를 이 런치가 띄울지. false 면 이미 떠 있는 것에 붙는다.
+        #
+        # 왜 필요한가
+        # -----------
+        # 한 머신에서 '콜드부팅 후 첫 가제보는 뜨는데 두 번째를 띄우면 GPU 가
+        # 죽는다' 가 다섯 번 연속 재현됐다. 가제보를 한 번만 띄우고 런마다
+        # ROS 스택만 갈아끼우면 그 순간을 안 만든다.
+        #
+        # 쓸 때는 로봇 모델을 먼저 지워야 한다 — 같은 이름이 이미 월드에
+        # 있으면 create 가 실패한다.
+        #   gz service -s /world/<월드>/remove --reqtype gz.msgs.Entity \
+        #     --reptype gz.msgs.Boolean --timeout 2000 \
+        #     --req 'name: "ugv1", type: MODEL'
+        DeclareLaunchArgument('start_gz', default_value='true'),
+        # 로봇을 월드에 새로 스폰할지. 가제보를 살려 둔 채 런만 갈아끼울
+        # 때 false 로 준다(이미 들어 있는 로봇을 그대로 쓴다).
+        DeclareLaunchArgument('spawn_robots', default_value='true'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')),
             launch_arguments={'gz_args': ['-r ', world_file]}.items(),
-            condition=UnlessCondition(headless)),
+            condition=IfCondition(PythonExpression([
+                "'", headless, "' != 'true' and '",
+                LaunchConfiguration('start_gz'), "' == 'true'"]))),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')),
             launch_arguments={'gz_args': ['-r -s ', world_file]}.items(),
-            condition=IfCondition(headless)),
+            condition=IfCondition(PythonExpression([
+                "'", headless, "' == 'true' and '",
+                LaunchConfiguration('start_gz'), "' == 'true'"]))),
 
         # 로봇마다 갈래가 진 토픽(카메라·안개·코스트맵)을 두 벌로 복제한
         # 설정을 쓴다. 1대용 설정을 그대로 쓰면 카메라가 하나만 보이고
@@ -320,6 +341,7 @@ def generate_launch_description():
                 'name': name, 'prefix': prefix, 'world': world,
                 'x': r['x'], 'y': r['y'], 'delay': str(SPAWN + i * 2.0),
                 'bridge_clock': 'true' if i == 0 else 'false',
+                'spawn': LaunchConfiguration('spawn_robots'),
             }.items()))
 
         # SLAM — 로봇마다 자기 지도를 만든다. 프레임 이름이 안 갈리면
