@@ -28,7 +28,33 @@ import sys
 RE_T = re.compile(r'\[(\d{10}\.\d+)\]')
 RE_CAND = re.compile(r'후보 발견 \((-?\d+\.?\d*),(-?\d+\.?\d*)\)')
 NEAR = 3.0
-MARKS = (600, 1200, 1800, 2700)      # 10·20·30·45분
+# 기본 시점. 45분 제한(큰 월드·XL)에 맞춰 놓은 값이다.
+DEFAULT_MARKS = (600, 1200, 1800, 2700)      # 10·20·30·45분
+
+
+def parse_marks(spec):
+    """'10,20,30,45,60,90' 처럼 분 단위로 받아 초로 바꾼다.
+
+    제한 시간이 맵마다 다르다. XXL(168x40, 조난자 34명)은 90분으로 도는데
+    기본 시점이 45분에서 끊기면 후반 절반이 안 보인다. 그렇다고 기본값을
+    90분까지 늘리면 45분짜리 표에 빈 칸이 생겨 XL 결과가 지저분해진다.
+    그래서 기본은 두고 필요할 때만 바꾼다.
+
+        MARKS=10,20,30,45,60,90 python3 tools/found_at.py truth.json *.log
+    """
+    out = []
+    for tok in spec.split(','):
+        tok = tok.strip()
+        if not tok:
+            continue
+        out.append(int(round(float(tok) * 60)))
+    if not out:
+        raise SystemExit('시점을 못 읽었다: %r' % spec)
+    return tuple(sorted(out))
+
+
+MARKS = (parse_marks(os.environ['MARKS'])
+         if os.environ.get('MARKS') else DEFAULT_MARKS)
 
 
 def load_truth(path):
