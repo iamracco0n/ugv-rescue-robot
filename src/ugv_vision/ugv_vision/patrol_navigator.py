@@ -29,7 +29,10 @@ import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.time import Time
+from rclpy.qos import (QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy,
+                       QoSReliabilityPolicy)
 
+from action_msgs.msg import GoalStatus, GoalStatusArray
 from nav_msgs.msg import OccupancyGrid, Odometry
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped, Point, PointStamped, Twist
@@ -198,6 +201,51 @@ def stuck_decision(ref, rx, ry, ryaw, now, eps_m, eps_rad, confirm_s,
     if now - st > confirm_s:
         return True, None
     return False, None
+
+
+def abort_decision(sent_t, now, grace_s, streak, max_streak):
+    """Nav2 가 목표를 포기했다는 통보를 어떻게 받을지 정한다.
+
+    반환: 'ignore' | 'retarget' | 'escape'
+
+    왜 이 판정이 필요한가
+    ---------------------
+    순찰기는 /goal_pose **토픽**으로 목표를 던진다. 액션 클라이언트가 아니라서
+    Nav2 의 결과를 못 받는다. 그래서 Nav2 가 복구행동(backup·spin·wait)을 다
+    쓰고 'navigate_to_pose Aborting' 으로 손을 든 뒤에도, 순찰기는 자기
+    제한시간이 다 흐를 때까지 그 목표를 붙들고 있었다.
+
+    그동안 로봇은 아무 데도 안 간다. 박힘 감지도 이 구간을 못 잡는다 —
+    Nav2 가 속도를 안 주고 있으므로 stuck_decision 이 '일부러 선 것' 으로
+    보고 넘긴다(그 판단은 복구행동 중에는 옳다).
+
+    실측(XL·XXL 3대 36런): Nav2 포기 런당 5.9회 · 회당 평균 101초 ·
+    **런당 9.9분**. 2대는 2.7회 · 60초 · 2.7분이었다. 45분 런에서 3대가
+    2대에 지던 몫의 상당 부분이 여기 서 있는 시간이다.
+
+    두 갈래로 나누는 이유
+    ---------------------
+    포기가 **목표 탓**이면(그 지점이 막혔다) 다른 목표를 고르면 된다.
+    포기가 **로봇 탓**이면(로봇이 팽창영역 안에 있어 어디로도 경로가 안 나온다)
+    다른 목표를 골라도 똑같이 실패한다. 그때 곧바로 재선정만 반복하면
+    프론티어 목록만 몇 초 만에 태우고 로봇은 그 자리에 남는다.
+
+    그래서 연속 포기를 센다. max_streak 번 연달아 포기하면 목표가 아니라
+    로봇이 문제라고 보고 후진 탈출로 넘긴다.
+
+    grace_s 는 직전 목표의 뒤늦은 통보를 지금 목표의 것으로 잘못 읽지 않기
+    위한 여유다. Nav2 는 복구행동을 다 쓰고 나서야 포기하므로 실제 포기는
+    목표 발행 후 최소 수십 초 뒤에 온다 — 몇 초짜리 여유로 충분히 갈린다.
+
+    다만 '우리가 밀어낸 목표' 를 걸러내는 주된 장치는 이 여유가 아니라
+    nav_status_cb 의 '가장 최근 목표일 때만' 규칙이다. 여기 여유는 새 목표가
+    아직 수락되기 전이라 밀려난 목표가 잠깐 최신인 그 틈만 막는다.
+    """
+    if sent_t is None or now - sent_t < grace_s:
+        return 'ignore'
+    if streak + 1 >= max_streak:
+        return 'escape'
+    return 'retarget'
 
 
 def goal_score(kind, n_cells, dist_m, res, view_r, lam):
@@ -415,6 +463,11 @@ class PatrolNavigator(Node):
         # 실행에서 탈출이 30회 연속 발동해 로봇을 복도 23m 뒤로 밀어냈다.
         self.declare_parameter('escape_cooldown_s',  25.0)  # 탈출 간 최소 간격
         self.declare_parameter('escape_max_streak',  3)     # 연속 이 횟수 넘으면 중단
+        # Nav2 가 목표를 포기했을 때 — 위 abort_decision 참고.
+        # 끄면(False) 예전처럼 제한시간이 다 흐를 때까지 기다린다.
+        self.declare_parameter('nav_abort_react',     True)
+        self.declare_parameter('nav_abort_grace_s',   3.0)  # 발행 직후 통보는 직전 목표 것
+        self.declare_parameter('nav_abort_max_streak', 3)   # 연속 이 횟수면 로봇 탓으로 봄
         # 조난자에 얼마나 가까이 가서 스캔할지
         # 조난자에서 유지할 거리(m).
         # 카메라가 지면 0.555m, 세로화각 48.8° → 거리 d 에서 보이는 최대 높이는
@@ -619,6 +672,9 @@ class PatrolNavigator(Node):
         self.escape_min_move   = float(self.get_parameter('escape_min_move').value)
         self.escape_cooldown   = float(self.get_parameter('escape_cooldown_s').value)
         self.escape_max_streak = int(self.get_parameter('escape_max_streak').value)
+        self.abort_react       = bool(self.get_parameter('nav_abort_react').value)
+        self.abort_grace_s     = float(self.get_parameter('nav_abort_grace_s').value)
+        self.abort_max_streak  = int(self.get_parameter('nav_abort_max_streak').value)
         self.cam_range         = float(self.get_parameter('cam_see_range').value)
         self.cam_min           = float(self.get_parameter('cam_see_min').value)
         self.cam_fov           = float(self.get_parameter('cam_fov_rad').value)
@@ -716,6 +772,14 @@ class PatrolNavigator(Node):
         self._escape_streak = 0               # 연속 탈출 횟수
         self._nav_down_warned = False
 
+        # Nav2 목표 포기 감지
+        self._goal_sent_t = None              # 마지막 goal 발행 시각(sec)
+        self._abort_pending = False           # 아직 처리 안 한 포기 통보
+        self._abort_streak = 0                # 연속 포기 횟수
+        # 같은 goal 의 상태가 매 메시지마다 다시 실려 오므로, 이미 센 것을
+        # 걸러야 한 번의 포기가 여러 번으로 불어나지 않는다.
+        self._abort_seen = deque(maxlen=64)   # 처리한 goal uuid
+
         # ── TF ───────────────────────────────────────────────────────
         self._tf_buf = tf2_ros.Buffer(cache_time=Duration(seconds=10))
         self._tf_listener = tf2_ros.TransformListener(self._tf_buf, self)
@@ -724,6 +788,16 @@ class PatrolNavigator(Node):
         self.create_subscription(Odometry,     'odom',        self.odom_cb,   10)
         self.create_subscription(OccupancyGrid, 'map',        self.map_cb,    1)
         self.create_subscription(PoseStamped,   'goal_pose',  self.goal_echo_cb, 10)
+        # Nav2 의 목표 처리 결과. 액션 서버는 상태를 평범한 토픽으로도 내보내므로
+        # 액션 클라이언트로 갈아타지 않고도 성공/포기를 들을 수 있다.
+        # QoS 는 액션 상태 토픽의 규정값(depth 1 · reliable · transient_local)을
+        # 그대로 맞춰야 한다 — 안 맞으면 조용히 아무것도 안 온다.
+        self.create_subscription(
+            GoalStatusArray, 'navigate_to_pose/_action/status', self.nav_status_cb,
+            QoSProfile(depth=1,
+                       history=QoSHistoryPolicy.KEEP_LAST,
+                       reliability=QoSReliabilityPolicy.RELIABLE,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(PointStamped,  'fire_alert', self.fire_cb,   10)
         self.create_subscription(Bool,          'patrol_enable', self.enable_cb, 10)
         # 조난자 확인 핸드셰이크 (target_manager_node)
@@ -1234,6 +1308,37 @@ class PatrolNavigator(Node):
         self.get_logger().info(
             f'외부 goal 수신 → MANUAL ({self._manual_goal[0]:.1f}, {self._manual_goal[1]:.1f})')
 
+    def nav_status_cb(self, msg: GoalStatusArray):
+        """Nav2 가 목표를 포기했으면 표시해 둔다.
+
+        ABORTED 를 곧이곧대로 '포기' 로 읽으면 안 된다. Nav2 는 **우리가 목표를
+        갈아끼울 때도** 밀려난 목표를 ABORTED 로 끝낸다(CANCELED 가 아니다).
+        순찰기는 조난자 확인·도착 후 정지·순찰 재개마다 목표를 새로 던지므로
+        그런 ABORTED 가 흔하다.
+
+        실측: 검증 런에서 ugv1 은 bt_navigator 가 'Aborting handle' 을 한 번도
+        안 찍었는데(=진짜 포기 0회) 상태 토픽에는 ABORTED 가 여러 건 올라왔다.
+        그걸 그대로 받아 멀쩡한 목표 2개를 실패로 버렸다.
+
+        가르는 규칙: **포기한 목표가 목록에서 가장 최근 목표일 때만** 진짜다.
+        우리가 밀어낸 것이라면 우리가 방금 던진 더 새로운 목표가 뒤에 있다.
+        Nav2 가 정말 손을 든 것이라면 그보다 새로운 목표는 없다.
+        """
+        if not self.abort_react:
+            return
+        newest, newest_t = None, None
+        for st in msg.status_list:
+            t = st.goal_info.stamp.sec + st.goal_info.stamp.nanosec * 1e-9
+            if newest_t is None or t > newest_t:
+                newest, newest_t = st, t
+        if newest is None or newest.status != GoalStatus.STATUS_ABORTED:
+            return
+        gid = bytes(newest.goal_info.goal_id.uuid)
+        if gid in self._abort_seen:
+            return
+        self._abort_seen.append(gid)
+        self._abort_pending = True
+
     def fire_cb(self, msg: PointStamped):
         fx, fy = msg.point.x, msg.point.y
         for (ax, ay) in self._alarmed_fires:
@@ -1302,7 +1407,37 @@ class PatrolNavigator(Node):
         g.pose.orientation.z = math.sin(yaw / 2.0)
         g.pose.orientation.w = math.cos(yaw / 2.0)
         self._pub_goals.append((float(x), float(y), self._now()))
+        # 새 목표를 던지는 순간 이전 목표의 포기 통보는 무의미해진다.
+        # 여기가 모든 goal 발행이 지나는 한 곳이라 여기서만 초기화하면 된다.
+        self._goal_sent_t = self._now()
+        self._abort_pending = False
         self.goal_pub.publish(g)
+
+    def _consume_abort(self):
+        """포기 통보가 왔으면 무엇을 할지 정하고, 통보를 소비한다.
+
+        반환: 'ignore' | 'retarget' | 'escape'
+        """
+        if not (self.abort_react and self._abort_pending):
+            return 'ignore'
+        act = abort_decision(self._goal_sent_t, self._now(), self.abort_grace_s,
+                             self._abort_streak, self.abort_max_streak)
+        if act == 'ignore':
+            return 'ignore'
+        self._abort_pending = False
+        self._abort_streak += 1
+        return act
+
+    def _begin_escape(self, rx, ry, now, why):
+        """후진 탈출 시작. tick() 의 박힘 경로와 같은 절차를 쓴다."""
+        self.get_logger().warn(why)
+        self._escape_start = now
+        self._escape_last_t = now
+        self._escape_streak += 1
+        self._escape_from = (rx, ry)
+        self.state = ESCAPE
+        # Nav2 를 먼저 세운다 — 안 그러면 컨트롤러 명령과 후진이 경합한다.
+        self._stop_here()
 
     def _stop_here(self):
         rx, ry = self._robot_pose()
@@ -1964,9 +2099,24 @@ class PatrolNavigator(Node):
                 reached = math.hypot(wx - rx, wy - ry) < self.reach_dist
                 timed_out = (self._wp_sent_t is not None
                              and self._now() - self._wp_sent_t > self.wp_timeout)
+                act = self._consume_abort()
+                if act == 'escape':
+                    self._begin_escape(
+                        rx, ry, self._now(),
+                        f'Nav2 가 {self._abort_streak}회 연속으로 목표를 포기 '
+                        f'({rx:.1f}, {ry:.1f}) — 로봇이 갇힌 것으로 보고 후진 탈출')
+                    self._abort_streak = 0
+                    return
                 if reached:
+                    self._abort_streak = 0
                     self.wp_idx = (self.wp_idx + 1) % len(self.waypoints)
                     self._goto_current_wp('도착 → 다음')
+                elif act == 'retarget':
+                    self.get_logger().warn(
+                        f'WP{self.wp_idx} Nav2 포기 통보 — 건너뜀 '
+                        f'(제한 {self.wp_timeout:.0f}s 를 기다리지 않는다)')
+                    self.wp_idx = (self.wp_idx + 1) % len(self.waypoints)
+                    self._goto_current_wp('건너뜀 → 다음')
                 elif timed_out:
                     self.get_logger().warn(
                         f'WP{self.wp_idx} 도달 실패({self.wp_timeout:.0f}s) — 건너뜀 '
@@ -2036,6 +2186,24 @@ class PatrolNavigator(Node):
         reached  = goal is not None and math.hypot(goal[0]-rx, goal[1]-ry) < self.frontier_reach
         timedout = (self._wp_sent_t is not None
                     and now - self._wp_sent_t > self._explore_budget)
+
+        # Nav2 가 이미 손을 들었으면 제한시간을 마저 기다리지 않는다.
+        # 기다려 봐야 로봇은 서 있기만 한다(실측 3대: 회당 평균 101초).
+        act = self._consume_abort()
+        if act == 'escape':
+            # 연속으로 포기했다 = 목표가 아니라 로봇이 문제다. 다른 목표를
+            # 골라도 똑같이 실패하므로, 프론티어를 더 태우기 전에 빠져나온다.
+            self._begin_escape(
+                rx, ry, now,
+                f'Nav2 가 {self._abort_streak}회 연속으로 목표를 포기 '
+                f'({rx:.1f}, {ry:.1f}) — 로봇이 갇힌 것으로 보고 후진 탈출')
+            self._abort_streak = 0
+            self._far_lock = False
+            return
+        failed = act == 'retarget'
+        if failed:
+            timedout = True        # 아래 재선정 경로를 그대로 탄다
+
         # 한 번 고른 목표는 도착/시간초과 전까지 붙든다.
         # 안 그러면 frontier_replan(6초)마다 재선정이 돌면서 가까운 후보가
         # 다시 뽑혀, 먼 목표에 닿기도 전에 취소된다. 실측으로 로봇이
@@ -2060,6 +2228,7 @@ class PatrolNavigator(Node):
             # 실제로 목표에 도달했다 = 내비게이션이 살아 있다는 증거.
             # 탈출 연속 카운터를 여기서만 푼다(타임아웃은 진행으로 안 친다).
             self._escape_streak = 0
+            self._abort_streak = 0
             self._nav_down_warned = False
             self._goals_done += 1
             # 도착만 하고 바로 다음 목표로 뜨면 사각지대를 못 본다.
@@ -2080,7 +2249,15 @@ class PatrolNavigator(Node):
             # 판정 기준과 같아야 한다). goal 로 남기면 같은 곳을 계속 다시 고른다.
             if self._frontier_src is not None:
                 self._visited_frontiers.append(self._frontier_src)
-            if timedout:
+            if failed:
+                # 제한시간과 구분해 남긴다 — 이 줄이 곧 '기다림을 몇 초 아꼈나'
+                # 의 측정 지점이다.
+                waited = now - self._goal_sent_t if self._goal_sent_t else 0.0
+                self.get_logger().warn(
+                    f'프론티어 ({goal[0]:.1f},{goal[1]:.1f}) Nav2 포기 통보 — '
+                    f'다른 곳으로 (발행 {waited:.0f}s 경과, 제한 '
+                    f'{self._explore_budget:.0f}s 였음)')
+            elif timedout:
                 self.get_logger().warn(
                     f'프론티어 ({goal[0]:.1f},{goal[1]:.1f}) 도달 실패 — 다른 곳으로')
 
@@ -2211,6 +2388,9 @@ class PatrolNavigator(Node):
         if goal is None:
             self._wp_sent_t = None
             self._far_lock = False
+            # 어차피 목표를 다시 고른다. 조사 중에 접근 목표가 포기된 통보가
+            # 남아 있으면 순찰 목표의 실패로 잘못 세어진다.
+            self._abort_pending = False
             self.get_logger().info('순찰 재개 — 탐사 목표 재선정')
             return
 
