@@ -187,6 +187,20 @@ RViz 는 `ugv_multi.rviz` 를 쓴다. 로봇별로 색이 다른 경로가 나�
 | `UGV_SPLIT` | `1` | 구역 분할 (`0` = 안 나눔) |
 | `UGV_SPLIT_AXIS` | `auto` | 분할 축 — 기본은 긴 축을 가른다 |
 | `UGV_SPAWN_DELAY` | `8.0` | 스폰 대기(초). 느린 머신은 25~30 |
+| `UGV_PATROL_ON_BOOT` | `1` | 뜨자마자 탐사 시작. `0` 이면 출발선에서 대기 — 아래 참고 |
+
+`UGV_PATROL_ON_BOOT=0` 은 **시연을 녹화할 때** 쓴다. 스택이 다 뜨는 데 1분쯤 걸리는데
+그동안 로봇이 이미 출발해 버리면 출발 장면을 못 찍는다. 0 으로 두면 로봇이 제자리에서
+기다리고, 준비가 끝난 뒤 이렇게 출발시킨다.
+
+```bash
+# 로봇마다 하나씩. 여러 대면 각각 쏜다.
+ros2 topic pub -1 /ugv1/patrol_enable std_msgs/msg/Bool "{data: true}"
+ros2 topic pub -1 /ugv2/patrol_enable std_msgs/msg/Bool "{data: true}"
+```
+
+`/patrol_enable` 은 volatile QoS 라 **구독자가 생기기 전에 쏘면 조용히 버려진다.**
+순찰 노드가 뜬 뒤에 쏠 것(로그에 `patrol_navigator 시작` 이 찍히면 준비된 것이다).
 
 **채택된 설정** — 재보고 정한 값이다. 끄면 성능이 떨어진다.
 
